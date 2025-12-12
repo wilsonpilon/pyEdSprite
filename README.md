@@ -4,6 +4,21 @@ Editor de sprites **MSX1** (estilo **TMS9918A**) feito em **Python** com interfa
 
 ---
 
+## Splashscreen
+
+> Observação: o projeto tenta carregar `splashscreen.jpg` primeiro, mas sem bibliotecas extras o Tk normalmente suporta melhor **PNG**.
+> Por isso, `splashscreen.png` funciona “out of the box”.
+
+![Splashscreen](splashscreen.png)
+
+---
+
+## Interface do usuário (exemplo)
+
+![Interface principal](PED_main.png)
+
+---
+
 ## Ideia do projeto
 
 O MSX1 trabalha com sprites com limitações bem específicas (tamanho fixo, **1 cor por sprite**, paleta reduzida, e composição de sprites maiores por blocos). Este projeto nasceu para facilitar:
@@ -71,9 +86,3 @@ Empilha visualmente 4 sprites (bloco 2x2) na mesma área **(mesmo tamanho do spr
   - `sqlite3` (persistência)
 - Dependência externa:
   - `customtkinter`
-
----
-
-## Instalação
-
-Com o ambiente virtual já configurado (recomendado):

@@ -1,12 +1,150 @@
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
+import os
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
 import customtkinter as ctk
+
+
+# ----------------------------
+# Splashscreen (sem Pillow)
+# - Tkinter PhotoImage normalmente suporta PNG (e GIF), não JPG.
+# - O código tenta carregar splashscreen.jpg e faz fallback para splashscreen.png.
+# - Faz fade-out via wm_attributes('-alpha', ...)
+# ----------------------------
+class SplashScreen(tk.Toplevel):
+    def __init__(
+        self,
+        master: tk.Tk,
+        image_candidates: List[str],
+        show_ms: int = 1200,
+        fade_ms: int = 900,
+        fade_steps: int = 18,
+    ) -> None:
+        super().__init__(master)
+
+        self._show_ms = int(show_ms)
+        self._fade_ms = int(fade_ms)
+        self._fade_steps = max(5, int(fade_steps))
+
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+
+        self._img = self._load_first_image(image_candidates)
+
+        self._container = tk.Frame(self, bg="#000000")
+        self._container.pack(fill="both", expand=True)
+
+        if self._img is not None:
+            lbl = tk.Label(self._container, image=self._img, bd=0, bg="#000000")
+            lbl.pack()
+            self.update_idletasks()
+            w, h = self._img.width(), self._img.height()
+            self.geometry(f"{w}x{h}+{self._center_x(w)}+{self._center_y(h)}")
+        else:
+            # Fallback visual caso nenhuma imagem seja carregável
+            lbl = tk.Label(
+                self._container,
+                text="pyEdSprite",
+                fg="#FFFFFF",
+                bg="#000000",
+                font=("Segoe UI", 24, "bold"),
+                padx=40,
+                pady=30,
+            )
+            lbl.pack()
+            self.update_idletasks()
+            w, h = self.winfo_width(), self.winfo_height()
+            self.geometry(f"{w}x{h}+{self._center_x(w)}+{self._center_y(h)}")
+
+        # começa totalmente opaco
+        try:
+            self.wm_attributes("-alpha", 1.0)
+        except Exception:
+            pass
+
+        # agenda o fade após alguns segundos
+        self.after(self._show_ms, self._start_fade_out)
+
+    def _center_x(self, w: int) -> int:
+        sw = self.winfo_screenwidth()
+        return max(0, (sw - w) // 2)
+
+    def _center_y(self, h: int) -> int:
+        sh = self.winfo_screenheight()
+        return max(0, (sh - h) // 2)
+
+    def _load_first_image(self, candidates: List[str]) -> Optional[tk.PhotoImage]:
+        for path in candidates:
+            if not path:
+                continue
+            if not os.path.exists(path):
+                continue
+            try:
+                return tk.PhotoImage(file=path)
+            except Exception:
+                continue
+        return None
+
+    def _start_fade_out(self) -> None:
+        # Se alpha não for suportado, simplesmente fecha
+        try:
+            self.wm_attributes("-alpha")
+        except Exception:
+            self.destroy()
+            return
+
+        step_delay = max(10, self._fade_ms // self._fade_steps)
+        self._fade_step(current=self._fade_steps, step_delay=step_delay)
+
+    def _fade_step(self, current: int, step_delay: int) -> None:
+        if current <= 0:
+            self.destroy()
+            return
+
+        alpha = current / float(self._fade_steps)
+        try:
+            self.wm_attributes("-alpha", alpha)
+        except Exception:
+            self.destroy()
+            return
+
+        self.after(step_delay, lambda: self._fade_step(current - 1, step_delay))
+
+
+def run_app_with_splash() -> None:
+    app = SpriteEditorApp()
+
+    # esconde a janela principal durante a splash
+    app.withdraw()
+    app.update_idletasks()
+
+    # tenta primeiro .jpg (pedido), mas sem Pillow normalmente falha; então cai para .png
+    splash = SplashScreen(
+        master=app,
+        image_candidates=["splashscreen.jpg", "splashscreen.png"],
+        show_ms=1300,
+        fade_ms=900,
+        fade_steps=18,
+    )
+
+    def reveal_main() -> None:
+        try:
+            splash.destroy()
+        except Exception:
+            pass
+        app.deiconify()
+        app.lift()
+        app.focus_force()
+
+    # quando a splash for destruída (fim do fade), mostra o app
+    splash.bind("<Destroy>", lambda _e: app.after(0, reveal_main))
+
+    app.mainloop()
 
 
 # ----------------------------
@@ -36,7 +174,7 @@ MSX1_PALETTE_HEX = [
 # ============================
 # UI scales
 # ============================
-EDITOR_SCALE = 16   # metade de 32 (ainda grande, mas bem mais controlável)
+EDITOR_SCALE = 16
 THUMB_SCALE = 2
 PREVIEW_SCALE = 2
 
@@ -107,8 +245,6 @@ class SpriteDB:
 
     @staticmethod
     def _pack_rows(size: int, rows: List[int]) -> bytes:
-        # 8x8: 8 bytes (1 byte per row)
-        # 16x16: 32 bytes (2 bytes per row, big-endian)
         if size == 8:
             return bytes((r & 0xFF) for r in rows)
         if size == 16:
@@ -117,6 +253,21 @@ class SpriteDB:
                 out.append((r >> 8) & 0xFF)
                 out.append(r & 0xFF)
             return bytes(out)
+        raise ValueError("size must be 8 or 16")
+
+    @staticmethod
+    def _unpack_rows(size: int, blob: bytes) -> List[int]:
+        if size == 8:
+            if len(blob) != 8:
+                raise ValueError("bitmap inválido para 8x8")
+            return [b for b in blob]
+        if size == 16:
+            if len(blob) != 32:
+                raise ValueError("bitmap inválido para 16x16")
+            rows: List[int] = []
+            for i in range(0, 32, 2):
+                rows.append((blob[i] << 8) | blob[i + 1])
+            return rows
         raise ValueError("size must be 8 or 16")
 
     def save_project(self, name: str, sprite_size: int, sprites: List[Sprite]) -> None:
@@ -150,6 +301,89 @@ class SpriteDB:
                     (project_id, idx, sp.color_index, blob),
                 )
 
+    def get_project_id_by_name(self, name: str) -> Optional[int]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM projects WHERE name = ?", (name,))
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+
+    def list_projects(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, name, sprite_size, created_at
+                FROM projects
+                ORDER BY created_at DESC, name ASC
+                """
+            )
+            rows = cur.fetchall()
+
+        return [
+            {"id": pid, "name": name, "sprite_size": ssize, "created_at": created_at}
+            for (pid, name, ssize, created_at) in rows
+        ]
+
+    def load_project(self, project_id: int) -> Tuple[str, int, int, List[Sprite]]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name, sprite_size, created_at FROM projects WHERE id = ?", (project_id,))
+            proj = cur.fetchone()
+            if not proj:
+                raise ValueError("Projeto não encontrado")
+
+            name, sprite_size, created_at = proj
+
+            cur.execute(
+                """
+                SELECT sprite_index, color_index, bitmap
+                FROM sprites
+                WHERE project_id = ?
+                ORDER BY sprite_index ASC
+                """,
+                (project_id,),
+            )
+            spr_rows = cur.fetchall()
+
+        sprites: List[Sprite] = []
+        for sprite_index, color_index, bitmap in spr_rows:
+            rows = self._unpack_rows(sprite_size, bitmap)
+            sprites.append(Sprite(size=sprite_size, color_index=color_index, rows=rows))
+
+        expected = 256 if sprite_size == 8 else 64
+        if len(sprites) < expected:
+            sprites.extend([Sprite.empty(size=sprite_size, color_index=15) for _ in range(expected - len(sprites))])
+        elif len(sprites) > expected:
+            sprites = sprites[:expected]
+
+        return name, sprite_size, created_at, sprites
+
+    def load_first_sprite(self, project_id: int) -> Optional[Sprite]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT sprite_size FROM projects WHERE id = ?", (project_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            sprite_size = row[0]
+
+            cur.execute(
+                """
+                SELECT color_index, bitmap
+                FROM sprites
+                WHERE project_id = ? AND sprite_index = 0
+                """,
+                (project_id,),
+            )
+            srow = cur.fetchone()
+            if not srow:
+                return Sprite.empty(size=sprite_size, color_index=15)
+
+            color_index, bitmap = srow
+            rows = self._unpack_rows(sprite_size, bitmap)
+            return Sprite(size=sprite_size, color_index=color_index, rows=rows)
+
 
 # ----------------------------
 # UI
@@ -173,9 +407,55 @@ class SpriteEditorApp(ctk.CTk):
 
         self.current_color_index: int = 15  # default white
 
+        # ============================
+        # Controle de "alterações pendentes" (dirty) do ÚLTIMO PROJETO CARREGADO
+        # ============================
+        self.last_loaded_project_id: Optional[int] = None
+        self.last_loaded_project_name: Optional[str] = None
+        self._baseline_signature: Optional[int] = None  # assinatura do estado "salvo/carregado"
+
+        # ============================
+        # Ferramentas de desenho (editor)
+        # ============================
+        self.tool_mode: str = "pencil"  # "pencil" | "line"
+        self._line_start: Optional[Tuple[int, int]] = None
+        self._line_current: Optional[Tuple[int, int]] = None
+        self._line_value: int = 1
+
         self._build_layout()
         self._reset_project(size=8)
 
+        # Captura fechamento pela janela (X)
+        self.protocol("WM_DELETE_WINDOW", self._request_exit)
+
+    # ----------------------------
+    # Dirty tracking
+    # ----------------------------
+    def _compute_signature(self) -> int:
+        parts: List[int] = [int(self.sprite_size), len(self.sprites)]
+        for sp in self.sprites:
+            parts.append(int(sp.color_index))
+            parts.extend(int(r) for r in sp.rows)
+        return hash(tuple(parts))
+
+    def _mark_baseline(self) -> None:
+        self._baseline_signature = self._compute_signature()
+
+    def _has_unsaved_changes_for_last_loaded(self) -> bool:
+        if self.last_loaded_project_id is None:
+            return False
+        if self._baseline_signature is None:
+            return False
+        return self._compute_signature() != self._baseline_signature
+
+    def _touch_change(self) -> None:
+        if self.last_loaded_project_id is None:
+            return
+        # baseline não muda aqui; serve para detectar mudanças
+
+    # ----------------------------
+    # UI
+    # ----------------------------
     def _build_layout(self) -> None:
         # Top bar
         top = ctk.CTkFrame(self)
@@ -209,6 +489,12 @@ class SpriteEditorApp(ctk.CTk):
 
         ctk.CTkButton(top, text="Novo Projeto", command=self._new_project).pack(side="left", padx=8)
         ctk.CTkButton(top, text="Salvar Projeto (SQLite)", command=self._save_project).pack(side="left", padx=8)
+        ctk.CTkButton(top, text="Carregar Projeto (SQLite)", command=self._open_load_dialog).pack(side="left", padx=8)
+
+        # Botão de saída
+        ctk.CTkButton(
+            top, text="Sair", fg_color="#8B2C2C", hover_color="#A63A3A", command=self._request_exit
+        ).pack(side="right", padx=8)
 
         # Main split
         main = ctk.CTkFrame(self)
@@ -232,11 +518,37 @@ class SpriteEditorApp(ctk.CTk):
         editor_row.pack(side="top", fill="x", padx=10, pady=10)
 
         # ============================
-        # Editor canvas with scrollbars
+        # Editor container + toolbar
         # ============================
         editor_container = ctk.CTkFrame(editor_row)
         editor_container.pack(side="left", padx=(0, 10), pady=0)
 
+        editor_toolbar = ctk.CTkFrame(editor_container)
+        editor_toolbar.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 8))
+        editor_container.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(editor_toolbar, text="Ferramentas:").pack(side="left", padx=(8, 6), pady=6)
+
+        self.btn_tool_pencil = ctk.CTkButton(
+            editor_toolbar, text="✎", width=38, height=32, command=self._set_tool_pencil
+        )
+        self.btn_tool_pencil.pack(side="left", padx=(0, 6), pady=6)
+
+        self.btn_tool_line = ctk.CTkButton(
+            editor_toolbar, text="／", width=38, height=32, command=self._set_tool_line
+        )
+        self.btn_tool_line.pack(side="left", padx=(0, 6), pady=6)
+
+        # Guarda cores padrão do tema (evita fg_color=None)
+        self._tool_btn_default_fg = self.btn_tool_pencil.cget("fg_color")
+        self._tool_btn_default_hover = self.btn_tool_pencil.cget("hover_color")
+
+        self.overlay_hint_label = ctk.CTkLabel(editor_toolbar, text="")
+        self.overlay_hint_label.pack(side="right", padx=8, pady=6)
+
+        # ============================
+        # Editor canvas
+        # ============================
         self.editor_canvas = tk.Canvas(
             editor_container,
             width=820,
@@ -244,19 +556,13 @@ class SpriteEditorApp(ctk.CTk):
             bg="#111111",
             highlightthickness=0
         )
-        self.editor_canvas.grid(row=0, column=0, sticky="nsew")
-
-        self.editor_vscroll = tk.Scrollbar(editor_container, orient="vertical", command=self.editor_canvas.yview)
-        self.editor_hscroll = tk.Scrollbar(editor_container, orient="horizontal", command=self.editor_canvas.xview)
-        self.editor_vscroll.grid(row=0, column=1, sticky="ns")
-        self.editor_hscroll.grid(row=1, column=0, sticky="ew")
-
-        self.editor_canvas.configure(yscrollcommand=self.editor_vscroll.set, xscrollcommand=self.editor_hscroll.set)
-        editor_container.grid_rowconfigure(0, weight=1)
-        editor_container.grid_columnconfigure(0, weight=1)
+        self.editor_canvas.grid(row=1, column=0, sticky="nsew")
+        editor_container.grid_rowconfigure(1, weight=1)
 
         self.editor_canvas.bind("<Button-1>", lambda e: self._on_editor_click(e, value=1))
         self.editor_canvas.bind("<Button-3>", lambda e: self._on_editor_click(e, value=0))
+        self.editor_canvas.bind("<Motion>", self._on_editor_motion)
+        self.editor_canvas.bind("<Leave>", lambda _e: self._clear_line_preview())
 
         # Side panel: palette + preview
         side = ctk.CTkFrame(editor_row)
@@ -274,6 +580,8 @@ class SpriteEditorApp(ctk.CTk):
 
         self.status_label = ctk.CTkLabel(side, text="Pronto.")
         self.status_label.pack(side="top", padx=10, pady=(6, 10))
+
+        self._update_tool_buttons()
 
     def _build_palette(self) -> None:
         for w in self.palette_frame.winfo_children():
@@ -298,9 +606,132 @@ class SpriteEditorApp(ctk.CTk):
         self.current_color_index = idx
         for sp_idx in self._get_target_sprite_indices_for_color():
             self.sprites[sp_idx].color_index = idx
+        self._touch_change()
         self.status_label.configure(text=f"Cor selecionada: {idx} ({MSX1_PALETTE_HEX[idx]})")
         self._redraw_all()
 
+    # ============================
+    # Ferramentas
+    # ============================
+    def _set_tool_pencil(self) -> None:
+        self.tool_mode = "pencil"
+        self._line_start = None
+        self._line_current = None
+        self._clear_line_preview()
+        self._update_tool_buttons()
+        self.status_label.configure(text="Ferramenta: Lápis (ponto a ponto)")
+
+    def _set_tool_line(self) -> None:
+        self.tool_mode = "line"
+        self._line_start = None
+        self._line_current = None
+        self._clear_line_preview()
+        self._update_tool_buttons()
+        self.status_label.configure(text="Ferramenta: Reta (clique início, mova, clique fim)")
+
+    def _update_tool_buttons(self) -> None:
+        active = "#2B6CB0"
+        default_fg = getattr(self, "_tool_btn_default_fg", "transparent")
+        default_hover = getattr(self, "_tool_btn_default_hover", None)
+
+        if self.tool_mode == "pencil":
+            self.btn_tool_pencil.configure(fg_color=active)
+            self.btn_tool_line.configure(fg_color=default_fg, hover_color=default_hover)
+        else:
+            self.btn_tool_pencil.configure(fg_color=default_fg, hover_color=default_hover)
+            self.btn_tool_line.configure(fg_color=active)
+
+    # ============================
+    # Conversões e reta
+    # ============================
+    def _editor_dims(self) -> Tuple[int, int]:
+        mode = self._get_edit_mode()
+        if mode == "2x2":
+            return self.sprite_size * 2, self.sprite_size * 2
+        return self.sprite_size, self.sprite_size
+
+    def _event_to_editor_xy(self, event: tk.Event) -> Optional[Tuple[int, int]]:
+        w, h = self._editor_dims()
+        scale = EDITOR_SCALE
+        cx = self.editor_canvas.canvasx(event.x)
+        cy = self.editor_canvas.canvasy(event.y)
+        x = int(cx // scale)
+        y = int(cy // scale)
+        if 0 <= x < w and 0 <= y < h:
+            return x, y
+        return None
+
+    @staticmethod
+    def _bresenham_line(x0: int, y0: int, x1: int, y1: int) -> List[Tuple[int, int]]:
+        pts: List[Tuple[int, int]] = []
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+
+        x, y = x0, y0
+        while True:
+            pts.append((x, y))
+            if x == x1 and y == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x += sx
+            if e2 <= dx:
+                err += dx
+                y += sy
+        return pts
+
+    def _apply_point_in_mode(self, x: int, y: int, value: int) -> None:
+        mode = self._get_edit_mode()
+        if mode == "single":
+            self._edit_single(self.selected_sprite_index, x, y, value)
+        elif mode == "2x2":
+            self._edit_2x2(x, y, value)
+        elif mode == "overlay":
+            self._edit_overlay(x, y, value)
+
+    def _commit_line(self, start: Tuple[int, int], end: Tuple[int, int], value: int) -> None:
+        pts = self._bresenham_line(start[0], start[1], end[0], end[1])
+        for x, y in pts:
+            self._apply_point_in_mode(x, y, value)
+
+    def _clear_line_preview(self) -> None:
+        self.editor_canvas.delete("tool_preview")
+
+    def _draw_line_preview(self, start: Tuple[int, int], end: Tuple[int, int]) -> None:
+        self._clear_line_preview()
+        pts = self._bresenham_line(start[0], start[1], end[0], end[1])
+        scale = EDITOR_SCALE
+        for x, y in pts:
+            x0 = x * scale
+            y0 = y * scale
+            self.editor_canvas.create_rectangle(
+                x0 + 2, y0 + 2, x0 + scale - 2, y0 + scale - 2,
+                outline="#FFFFFF",
+                width=2,
+                tags=("tool_preview",),
+            )
+
+    def _on_editor_motion(self, event: tk.Event) -> None:
+        if self.tool_mode != "line":
+            return
+        if self._line_start is None:
+            return
+        pos = self._event_to_editor_xy(event)
+        if pos is None:
+            self._clear_line_preview()
+            return
+        if pos == self._line_current:
+            return
+        self._line_current = pos
+        self._draw_line_preview(self._line_start, self._line_current)
+
+    # ============================
+    # Projeto / tamanho
+    # ============================
     def _on_size_changed(self, value: str) -> None:
         new_size = 8 if value == "8x8" else 16
         if new_size != self.sprite_size:
@@ -321,6 +752,16 @@ class SpriteEditorApp(ctk.CTk):
         count = 256 if size == 8 else 64
         self.sprites = [Sprite.empty(size=size, color_index=15) for _ in range(count)]
 
+        self.last_loaded_project_id = None
+        self.last_loaded_project_name = None
+        self._baseline_signature = None
+
+        self.tool_mode = "pencil"
+        self._line_start = None
+        self._line_current = None
+        self._clear_line_preview()
+        self._update_tool_buttons()
+
         self.table_label.configure(
             text=f"Sprites ({count}) - miniaturas 2x - grade {'16x16' if size == 8 else '8x8'}"
         )
@@ -328,6 +769,9 @@ class SpriteEditorApp(ctk.CTk):
         self._rebuild_sprite_table()
         self._redraw_all()
 
+    # ============================
+    # Grid / seleção
+    # ============================
     def _grid_dims(self) -> Tuple[int, int]:
         if self.sprite_size == 8:
             return 16, 16
@@ -387,39 +831,56 @@ class SpriteEditorApp(ctk.CTk):
             return block if block else [self.selected_sprite_index]
         return [self.selected_sprite_index]
 
+    # ============================
+    # Editor input
+    # ============================
     def _on_editor_click(self, event: tk.Event, value: int) -> None:
-        mode = self._get_edit_mode()
+        pos = self._event_to_editor_xy(event)
+        if pos is None:
+            return
 
-        if mode == "2x2":
-            if not self._get_2x2_indices():
+        if self.tool_mode == "pencil":
+            mode = self._get_edit_mode()
+
+            if mode == "2x2" and not self._get_2x2_indices():
                 self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
                 return
-            w = self.sprite_size * 2
-            h = self.sprite_size * 2
-        else:
-            w = self.sprite_size
-            h = self.sprite_size
 
-        scale = EDITOR_SCALE
+            x, y = pos
+            if mode == "single":
+                self._edit_single(self.selected_sprite_index, x, y, value)
+            elif mode == "2x2":
+                self._edit_2x2(x, y, value)
+            elif mode == "overlay":
+                self._edit_overlay(x, y, value)
+            else:
+                return
 
-        cx = self.editor_canvas.canvasx(event.x)
-        cy = self.editor_canvas.canvasy(event.y)
-
-        x = int(cx // scale)
-        y = int(cy // scale)
-        if not (0 <= x < w and 0 <= y < h):
+            self._touch_change()
+            self._redraw_all()
             return
 
-        if mode == "single":
-            self._edit_single(self.selected_sprite_index, x, y, value)
-        elif mode == "2x2":
-            self._edit_2x2(x, y, value)
-        elif mode == "overlay":
-            self._edit_overlay(x, y, value)
-        else:
-            return
+        if self.tool_mode == "line":
+            if self._get_edit_mode() == "2x2" and not self._get_2x2_indices():
+                self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
+                return
 
-        self._redraw_all()
+            if self._line_start is None:
+                self._line_start = pos
+                self._line_current = pos
+                self._line_value = value
+                self._draw_line_preview(self._line_start, self._line_current)
+                return
+
+            end = pos
+            self._commit_line(self._line_start, end, self._line_value)
+            self._line_start = None
+            self._line_current = None
+            self._clear_line_preview()
+
+            self._touch_change()
+            self._redraw_all()
+            return
 
     def _edit_single(self, sp_idx: int, x: int, y: int, value: int) -> None:
         sp = self.sprites[sp_idx]
@@ -450,6 +911,9 @@ class SpriteEditorApp(ctk.CTk):
         sp_idx = block[active]
         self._edit_single(sp_idx, x, y, value)
 
+    # ============================
+    # Redraw
+    # ============================
     def _redraw_all(self) -> None:
         self._redraw_editor()
         self._redraw_preview()
@@ -472,6 +936,13 @@ class SpriteEditorApp(ctk.CTk):
                     y0 = y * scale
                     canvas.create_rectangle(x0, y0, x0 + scale, y0 + scale, outline="", fill=on_color)
 
+    def _update_overlay_hint(self) -> None:
+        if self._get_edit_mode() == "overlay":
+            active = int(self.overlay_active.get())
+            self.overlay_hint_label.configure(text=f"Overlay: editando camada {active + 1}/4")
+        else:
+            self.overlay_hint_label.configure(text="")
+
     def _redraw_editor(self) -> None:
         mode = self._get_edit_mode()
         scale = EDITOR_SCALE
@@ -488,6 +959,8 @@ class SpriteEditorApp(ctk.CTk):
                     fill="#FFFFFF",
                     text="2x2 indisponível na borda.\nSelecione um sprite que permita bloco 2x2."
                 )
+                self._clear_line_preview()
+                self._update_overlay_hint()
                 return
 
             w = self.sprite_size * 2
@@ -512,21 +985,18 @@ class SpriteEditorApp(ctk.CTk):
                                 )
 
             self._draw_grid(self.editor_canvas, w, h, scale, major_every=self.sprite_size)
-
         else:
             sp = self.sprites[self.selected_sprite_index]
             self._draw_sprite_on_canvas(self.editor_canvas, sp, scale=scale, bg="#111111")
             self.editor_canvas.configure(scrollregion=(0, 0, sp.size * scale, sp.size * scale))
             self._draw_grid(self.editor_canvas, sp.size, sp.size, scale, major_every=sp.size)
 
-            if mode == "overlay":
-                block = self._get_2x2_indices()
-                if block:
-                    active = int(self.overlay_active.get())
-                    self.editor_canvas.create_text(
-                        6, 6, anchor="nw", fill="#FFFFFF",
-                        text=f"Overlay: editando camada {active + 1}/4"
-                    )
+        if self.tool_mode == "line" and self._line_start is not None and self._line_current is not None:
+            self._draw_line_preview(self._line_start, self._line_current)
+        else:
+            self._clear_line_preview()
+
+        self._update_overlay_hint()
 
     def _draw_grid(self, canvas: tk.Canvas, w: int, h: int, scale: int, major_every: int) -> None:
         for x in range(w + 1):
@@ -606,12 +1076,7 @@ class SpriteEditorApp(ctk.CTk):
                             self.preview_canvas.create_rectangle(
                                 x0, y0, x0 + scale, y0 + scale, outline="", fill=on_color
                             )
-
-            active = int(self.overlay_active.get())
-            self.preview_canvas.create_text(
-                4, 4, anchor="nw", fill="#FFFFFF",
-                text=f"Overlay (edit: {active + 1}/4)"
-            )
+            return
 
     def _redraw_thumbnails(self) -> None:
         thumb_scale = THUMB_SCALE
@@ -637,21 +1102,192 @@ class SpriteEditorApp(ctk.CTk):
                             outline="", fill=on_color
                         )
 
+    # ============================
+    # Salvamento
+    # ============================
+    def _save_project_with_name(self, name: str, *, update_last_loaded: bool) -> bool:
+        try:
+            self.db.save_project(name=name, sprite_size=self.sprite_size, sprites=self.sprites)
+
+            if update_last_loaded:
+                self.last_loaded_project_name = name
+                self.last_loaded_project_id = self.db.get_project_id_by_name(name)
+
+            self._mark_baseline()
+            self.status_label.configure(text=f"Projeto salvo: {name}")
+            return True
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Erro", "Nome de projeto já existe e não pôde ser sobrescrito.")
+            return False
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao salvar: {e}")
+            return False
+
     def _save_project(self) -> None:
-        default_name = f"projeto_{int(time.time())}"
+        default_name = self.last_loaded_project_name or f"projeto_{int(time.time())}"
         name = simpledialog.askstring("Salvar projeto", "Nome do projeto:", initialvalue=default_name)
         if not name:
             return
 
-        try:
-            self.db.save_project(name=name, sprite_size=self.sprite_size, sprites=self.sprites)
+        ok = self._save_project_with_name(name, update_last_loaded=True)
+        if ok:
             messagebox.showinfo("Salvo", f"Projeto '{name}' salvo em sprites.db")
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Erro", "Nome de projeto já existe e não pôde ser sobrescrito.")
+
+    def _save_last_loaded_project(self) -> bool:
+        if not self.last_loaded_project_name:
+            return False
+        return self._save_project_with_name(self.last_loaded_project_name, update_last_loaded=True)
+
+    # ============================
+    # Carregar projeto (UI + DB)
+    # ============================
+    @staticmethod
+    def _format_dt(ts: int) -> str:
+        try:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        except Exception:
+            return str(ts)
+
+    def _apply_loaded_project(self, project_id: int, name: str, sprite_size: int, sprites: List[Sprite]) -> None:
+        self.sprite_size = sprite_size
+        self.size_seg.set("8x8" if sprite_size == 8 else "16x16")
+
+        self.sprites = sprites
+        self.selected_sprite_index = 0
+        self.current_color_index = 15
+
+        self.last_loaded_project_id = project_id
+        self.last_loaded_project_name = name
+        self._mark_baseline()
+
+        self.tool_mode = "pencil"
+        self._line_start = None
+        self._line_current = None
+        self._clear_line_preview()
+        self._update_tool_buttons()
+
+        count = 256 if sprite_size == 8 else 64
+        self.table_label.configure(
+            text=f"Sprites ({count}) - miniaturas 2x - grade {'16x16' if sprite_size == 8 else '8x8'}"
+        )
+
+        self.status_label.configure(text=f"Projeto carregado: {name}")
+        self._rebuild_sprite_table()
+        self._redraw_all()
+
+    def _open_load_dialog(self) -> None:
+        try:
+            projects = self.db.list_projects()
         except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao salvar: {e}")
+            messagebox.showerror("Erro", f"Falha ao listar projetos: {e}")
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Carregar projeto (SQLite)")
+        dlg.geometry("820x620")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        header = ctk.CTkFrame(dlg)
+        header.pack(side="top", fill="x", padx=12, pady=12)
+
+        ctk.CTkLabel(
+            header,
+            text="Projetos salvos",
+            font=ctk.CTkFont(size=18, weight="bold")
+        ).pack(side="left")
+
+        body = ctk.CTkFrame(dlg)
+        body.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 12))
+
+        if not projects:
+            ctk.CTkLabel(body, text="Nenhum projeto encontrado em sprites.db").pack(side="top", pady=20)
+            ctk.CTkButton(body, text="Fechar", command=dlg.destroy).pack(side="top", pady=10)
+            return
+
+        list_frame = ctk.CTkScrollableFrame(body)
+        list_frame.pack(side="top", fill="both", expand=True)
+
+        preview_scale = 10
+
+        def add_project_row(p: Dict[str, Any]) -> None:
+            row = ctk.CTkFrame(list_frame)
+            row.pack(side="top", fill="x", padx=10, pady=8)
+
+            left = ctk.CTkFrame(row)
+            left.pack(side="left", padx=10, pady=10)
+
+            spr = None
+            try:
+                spr = self.db.load_first_sprite(p["id"])
+            except Exception:
+                spr = None
+
+            cv = tk.Canvas(left, width=8 * preview_scale, height=8 * preview_scale, bg="#111111", highlightthickness=0)
+            cv.pack(side="top")
+
+            if spr is not None:
+                self._draw_sprite_on_canvas(cv, spr, scale=preview_scale, bg="#111111")
+
+            info = ctk.CTkFrame(row)
+            info.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+            ctk.CTkLabel(info, text=p["name"], font=ctk.CTkFont(size=16, weight="bold")).pack(
+                side="top", anchor="w"
+            )
+            ctk.CTkLabel(info, text=f"Criado em: {self._format_dt(int(p['created_at']))}").pack(
+                side="top", anchor="w", pady=(4, 0)
+            )
+            ctk.CTkLabel(info, text=f"Tamanho: {p['sprite_size']}x{p['sprite_size']}").pack(
+                side="top", anchor="w", pady=(2, 0)
+            )
+
+            actions = ctk.CTkFrame(row)
+            actions.pack(side="right", padx=10, pady=10)
+
+            def do_load() -> None:
+                try:
+                    name, sprite_size, _created_at, sprites = self.db.load_project(int(p["id"]))
+                    self._apply_loaded_project(
+                        project_id=int(p["id"]),
+                        name=name,
+                        sprite_size=sprite_size,
+                        sprites=sprites
+                    )
+                    dlg.destroy()
+                except Exception as e:
+                    messagebox.showerror("Erro", f"Falha ao carregar projeto: {e}")
+
+            ctk.CTkButton(actions, text="Carregar", command=do_load, width=120).pack(side="top")
+            ctk.CTkButton(actions, text="Fechar", command=dlg.destroy, width=120).pack(side="top", pady=(8, 0))
+
+        for p in projects:
+            add_project_row(p)
+
+    # ============================
+    # Saída
+    # ============================
+    def _request_exit(self) -> None:
+        if self._has_unsaved_changes_for_last_loaded():
+            proj_name = self.last_loaded_project_name or "(sem nome)"
+            resp = messagebox.askyesnocancel(
+                "Sair",
+                f"O projeto '{proj_name}' foi alterado desde o último carregamento/salvamento.\n\n"
+                f"Deseja salvar antes de sair?"
+            )
+            if resp is None:
+                return
+            if resp is True:
+                ok = self._save_last_loaded_project()
+                if not ok:
+                    return
+                self.destroy()
+                return
+            self.destroy()
+            return
+
+        self.destroy()
 
 
 if __name__ == "__main__":
-    app = SpriteEditorApp()
-    app.mainloop()
+    run_app_with_splash()
