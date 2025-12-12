@@ -15,7 +15,7 @@ Editor de sprites **MSX1** (estilo **TMS9918A**) feito em **Python** com interfa
 
 ## Interface do usuário (exemplo)
 
-![Interface principal](PED_main.png)
+![Interface principal](PED2_main.png)
 
 ---
 
