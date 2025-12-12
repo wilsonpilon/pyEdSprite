@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
 import os
+import math
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -12,9 +13,6 @@ import customtkinter as ctk
 
 # ----------------------------
 # Splashscreen (sem Pillow)
-# - Tkinter PhotoImage normalmente suporta PNG (e GIF), não JPG.
-# - O código tenta carregar splashscreen.jpg e faz fallback para splashscreen.png.
-# - Faz fade-out via wm_attributes('-alpha', ...)
 # ----------------------------
 class SplashScreen(tk.Toplevel):
     def __init__(
@@ -46,7 +44,6 @@ class SplashScreen(tk.Toplevel):
             w, h = self._img.width(), self._img.height()
             self.geometry(f"{w}x{h}+{self._center_x(w)}+{self._center_y(h)}")
         else:
-            # Fallback visual caso nenhuma imagem seja carregável
             lbl = tk.Label(
                 self._container,
                 text="pyEdSprite",
@@ -61,13 +58,11 @@ class SplashScreen(tk.Toplevel):
             w, h = self.winfo_width(), self.winfo_height()
             self.geometry(f"{w}x{h}+{self._center_x(w)}+{self._center_y(h)}")
 
-        # começa totalmente opaco
         try:
             self.wm_attributes("-alpha", 1.0)
         except Exception:
             pass
 
-        # agenda o fade após alguns segundos
         self.after(self._show_ms, self._start_fade_out)
 
     def _center_x(self, w: int) -> int:
@@ -91,7 +86,6 @@ class SplashScreen(tk.Toplevel):
         return None
 
     def _start_fade_out(self) -> None:
-        # Se alpha não for suportado, simplesmente fecha
         try:
             self.wm_attributes("-alpha")
         except Exception:
@@ -118,12 +112,9 @@ class SplashScreen(tk.Toplevel):
 
 def run_app_with_splash() -> None:
     app = SpriteEditorApp()
-
-    # esconde a janela principal durante a splash
     app.withdraw()
     app.update_idletasks()
 
-    # tenta primeiro .jpg (pedido), mas sem Pillow normalmente falha; então cai para .png
     splash = SplashScreen(
         master=app,
         image_candidates=["splashscreen.jpg", "splashscreen.png"],
@@ -141,16 +132,12 @@ def run_app_with_splash() -> None:
         app.lift()
         app.focus_force()
 
-    # quando a splash for destruída (fim do fade), mostra o app
     splash.bind("<Destroy>", lambda _e: app.after(0, reveal_main))
-
     app.mainloop()
 
 
 # ----------------------------
 # MSX1 palette (TMS9918A-ish)
-# 16 colors, index 0..15.
-# Nota: a cor 0 costuma ser "transparente" em sprites; aqui usamos preto como visualização.
 # ----------------------------
 MSX1_PALETTE_HEX = [
     "#000000",  # 0 Transparent (visual: black)
@@ -180,7 +167,81 @@ PREVIEW_SCALE = 2
 
 
 # ----------------------------
-# Data model
+# Brush model + helpers
+# ----------------------------
+@dataclass
+class Brush:
+    id: Optional[int]
+    name: str
+    width: int
+    height: int
+    rows: List[int]  # bitmask per row (<= 8 bits used)
+
+    def validate(self) -> None:
+        if not (1 <= self.width <= 8 and 1 <= self.height <= 8):
+            raise ValueError("Brush deve ser 1..8 em largura/altura")
+        if len(self.rows) != self.height:
+            raise ValueError("Brush.rows deve ter height linhas")
+        for r in self.rows:
+            if not (0 <= r <= 0xFF):
+                raise ValueError("Linha inválida no brush")
+
+    def points_centered(self) -> List[Tuple[int, int]]:
+        """Retorna offsets (dx,dy) com origem no centro do brush."""
+        self.validate()
+        ox = self.width // 2
+        oy = self.height // 2
+        pts: List[Tuple[int, int]] = []
+        for y in range(self.height):
+            row = self.rows[y]
+            for x in range(self.width):
+                if row & (1 << (self.width - 1 - x)):
+                    pts.append((x - ox, y - oy))
+        return pts
+
+    @staticmethod
+    def from_points(name: str, width: int, height: int, pts: List[Tuple[int, int]]) -> "Brush":
+        rows = [0 for _ in range(height)]
+        for x, y in pts:
+            if 0 <= x < width and 0 <= y < height:
+                rows[y] |= 1 << (width - 1 - x)
+        return Brush(id=None, name=name, width=width, height=height, rows=rows)
+
+    @staticmethod
+    def square(name: str, size: int) -> "Brush":
+        size = max(1, min(8, int(size)))
+        rows = [(1 << size) - 1 for _ in range(size)]
+        # alinhar bits à esquerda (MSB-first dentro da largura)
+        rows = [r << (8 - size) for r in rows]  # temporário 8-bit
+        # recompacta para "width bits" à esquerda (usaremos width ao ler)
+        # Aqui guardamos já na convenção width-bit MSB: vamos converter para width bits
+        # removendo o shift extra:
+        rows = [((1 << size) - 1) for _ in range(size)]
+        return Brush(id=None, name=name, width=size, height=size, rows=rows)
+
+    @staticmethod
+    def rect(name: str, width: int, height: int) -> "Brush":
+        width = max(1, min(8, int(width)))
+        height = max(1, min(8, int(height)))
+        rows = [((1 << width) - 1) for _ in range(height)]
+        return Brush(id=None, name=name, width=width, height=height, rows=rows)
+
+    @staticmethod
+    def round(name: str, diameter: int) -> "Brush":
+        d = max(1, min(8, int(diameter)))
+        r = (d - 1) / 2.0
+        cx = (d - 1) / 2.0
+        cy = (d - 1) / 2.0
+        pts: List[Tuple[int, int]] = []
+        for y in range(d):
+            for x in range(d):
+                if math.hypot(x - cx, y - cy) <= r + 0.001:
+                    pts.append((x, y))
+        return Brush.from_points(name=name, width=d, height=d, pts=pts)
+
+
+# ----------------------------
+# Data model (sprites)
 # ----------------------------
 @dataclass
 class Sprite:
@@ -211,6 +272,7 @@ class SpriteDB:
     def __init__(self, db_path: str = "sprites.db") -> None:
         self.db_path = db_path
         self._init_db()
+        self._init_brushes()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -243,6 +305,118 @@ class SpriteDB:
                 """
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS brushes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    mask BLOB NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    user_defined INTEGER NOT NULL DEFAULT 0
+                );
+                """
+            )
+
+    # ---------- Brushes ----------
+    @staticmethod
+    def _pack_brush(width: int, height: int, rows: List[int]) -> bytes:
+        if not (1 <= width <= 8 and 1 <= height <= 8):
+            raise ValueError("brush size inválido")
+        if len(rows) != height:
+            raise ValueError("rows inválidas")
+        out = bytearray()
+        for r in rows:
+            out.append(r & 0xFF)
+        return bytes(out)
+
+    @staticmethod
+    def _unpack_brush(width: int, height: int, blob: bytes) -> List[int]:
+        if len(blob) != height:
+            raise ValueError("mask inválida")
+        return [int(b) & 0xFF for b in blob]
+
+    def _init_brushes(self) -> None:
+        """Insere pincéis predefinidos apenas se a tabela estiver vazia."""
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM brushes")
+            n = int(cur.fetchone()[0])
+            if n > 0:
+                return
+
+            defaults: List[Brush] = [
+                Brush(id=None, name="1x1 (pixel)", width=1, height=1, rows=[0b1]),
+                Brush.rect(name="Quadrado 2x2", width=2, height=2),
+                Brush.round(name="Redondo 3x3", diameter=3),
+                Brush.rect(name="Retângulo 4x2", width=4, height=2),
+                Brush.rect(name="Retângulo 2x4", width=2, height=4),
+                Brush.round(name="Redondo 5x5", diameter=5),
+            ]
+
+            ts = int(time.time())
+            for br in defaults:
+                br.validate()
+                blob = self._pack_brush(br.width, br.height, br.rows)
+                conn.execute(
+                    """
+                    INSERT INTO brushes (name, width, height, mask, created_at, user_defined)
+                    VALUES (?, ?, ?, ?, ?, 0)
+                    """,
+                    (br.name, br.width, br.height, blob, ts),
+                )
+
+    def list_brushes(self) -> List[Brush]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, name, width, height, mask
+                FROM brushes
+                ORDER BY user_defined ASC, name ASC
+                """
+            )
+            rows = cur.fetchall()
+
+        out: List[Brush] = []
+        for bid, name, w, h, blob in rows:
+            rows_mask = self._unpack_brush(int(w), int(h), blob)
+            out.append(Brush(id=int(bid), name=str(name), width=int(w), height=int(h), rows=rows_mask))
+        return out
+
+    def save_brush(self, name: str, width: int, height: int, rows: List[int], *, user_defined: bool = True) -> int:
+        br = Brush(id=None, name=name, width=width, height=height, rows=rows)
+        br.validate()
+        blob = self._pack_brush(width, height, rows)
+        ts = int(time.time())
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM brushes WHERE name = ?", (name,))
+            row = cur.fetchone()
+            if row:
+                bid = int(row[0])
+                cur.execute(
+                    """
+                    UPDATE brushes
+                    SET width = ?, height = ?, mask = ?, created_at = ?, user_defined = ?
+                    WHERE id = ?
+                    """,
+                    (width, height, blob, ts, 1 if user_defined else 0, bid),
+                )
+                return bid
+
+            cur.execute(
+                """
+                INSERT INTO brushes (name, width, height, mask, created_at, user_defined)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (name, width, height, blob, ts, 1 if user_defined else 0),
+            )
+            return int(cur.lastrowid)
+
+    # ---------- Sprites ----------
     @staticmethod
     def _pack_rows(size: int, rows: List[int]) -> bytes:
         if size == 8:
@@ -386,6 +560,227 @@ class SpriteDB:
 
 
 # ----------------------------
+# Brush editor dialog
+# ----------------------------
+class BrushEditorDialog(ctk.CTkToplevel):
+    def __init__(self, master: "SpriteEditorApp", initial: Optional[Brush] = None) -> None:
+        super().__init__(master)
+        self.title("Editor de Pincel (até 8x8)")
+        self.geometry("560x520")
+        self.transient(master)
+        self.grab_set()
+
+        self._result: Optional[Brush] = None
+
+        self.w_var = tk.IntVar(value=initial.width if initial else 3)
+        self.h_var = tk.IntVar(value=initial.height if initial else 3)
+
+        self.shape_var = tk.StringVar(value="Redondo" if initial is None else "Personalizado")
+
+        self._grid = [[0 for _ in range(8)] for _ in range(8)]
+        if initial:
+            for y in range(initial.height):
+                row = initial.rows[y]
+                for x in range(initial.width):
+                    if row & (1 << (initial.width - 1 - x)):
+                        self._grid[y][x] = 1
+
+        top = ctk.CTkFrame(self)
+        top.pack(side="top", fill="x", padx=12, pady=12)
+
+        ctk.CTkLabel(top, text="Largura:").pack(side="left", padx=(0, 6))
+        self.w_opt = ctk.CTkOptionMenu(top, values=[str(i) for i in range(1, 9)], command=self._on_w_changed)
+        self.w_opt.pack(side="left", padx=(0, 12))
+        self.w_opt.set(str(self.w_var.get()))
+
+        ctk.CTkLabel(top, text="Altura:").pack(side="left", padx=(0, 6))
+        self.h_opt = ctk.CTkOptionMenu(top, values=[str(i) for i in range(1, 9)], command=self._on_h_changed)
+        self.h_opt.pack(side="left", padx=(0, 12))
+        self.h_opt.set(str(self.h_var.get()))
+
+        ctk.CTkLabel(top, text="Forma:").pack(side="left", padx=(0, 6))
+        self.shape_opt = ctk.CTkOptionMenu(
+            top,
+            values=["Redondo", "Quadrado", "Retângulo", "Personalizado"],
+            command=self._on_shape_changed,
+        )
+        self.shape_opt.pack(side="left")
+        self.shape_opt.set(self.shape_var.get())
+
+        mid = ctk.CTkFrame(self)
+        mid.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 12))
+
+        ctk.CTkLabel(mid, text="Clique para ligar/desligar células do pincel:").pack(side="top", anchor="w", pady=(10, 8))
+
+        self.canvas = tk.Canvas(mid, width=8 * 48, height=8 * 48, bg="#111111", highlightthickness=0)
+        self.canvas.pack(side="top", pady=(0, 10))
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+
+        btn_row = ctk.CTkFrame(mid)
+        btn_row.pack(side="top", fill="x", pady=(0, 10))
+
+        ctk.CTkButton(btn_row, text="Preencher", command=self._fill).pack(side="left", padx=6)
+        ctk.CTkButton(btn_row, text="Limpar", command=self._clear).pack(side="left", padx=6)
+        ctk.CTkButton(btn_row, text="Inverter", command=self._invert).pack(side="left", padx=6)
+
+        bottom = ctk.CTkFrame(self)
+        bottom.pack(side="bottom", fill="x", padx=12, pady=12)
+
+        ctk.CTkButton(bottom, text="Cancelar", command=self._cancel).pack(side="right", padx=6)
+        ctk.CTkButton(bottom, text="Usar este pincel", command=self._ok).pack(side="right", padx=6)
+
+        self._apply_shape()
+        self._redraw()
+
+    def result(self) -> Optional[Brush]:
+        return self._result
+
+    def _on_w_changed(self, v: str) -> None:
+        self.w_var.set(int(v))
+        if self.shape_var.get() != "Personalizado":
+            self._apply_shape()
+        self._redraw()
+
+    def _on_h_changed(self, v: str) -> None:
+        self.h_var.set(int(v))
+        if self.shape_var.get() != "Personalizado":
+            self._apply_shape()
+        self._redraw()
+
+    def _on_shape_changed(self, v: str) -> None:
+        self.shape_var.set(v)
+        if v != "Personalizado":
+            self._apply_shape()
+        self._redraw()
+
+    def _fill(self) -> None:
+        w, h = self.w_var.get(), self.h_var.get()
+        for y in range(h):
+            for x in range(w):
+                self._grid[y][x] = 1
+        self.shape_var.set("Personalizado")
+        self.shape_opt.set("Personalizado")
+        self._redraw()
+
+    def _clear(self) -> None:
+        w, h = self.w_var.get(), self.h_var.get()
+        for y in range(h):
+            for x in range(w):
+                self._grid[y][x] = 0
+        self.shape_var.set("Personalizado")
+        self.shape_opt.set("Personalizado")
+        self._redraw()
+
+    def _invert(self) -> None:
+        w, h = self.w_var.get(), self.h_var.get()
+        for y in range(h):
+            for x in range(w):
+                self._grid[y][x] = 0 if self._grid[y][x] else 1
+        self.shape_var.set("Personalizado")
+        self.shape_opt.set("Personalizado")
+        self._redraw()
+
+    def _apply_shape(self) -> None:
+        w, h = self.w_var.get(), self.h_var.get()
+        shape = self.shape_var.get()
+
+        for yy in range(8):
+            for xx in range(8):
+                self._grid[yy][xx] = 0
+
+        if shape == "Quadrado":
+            s = min(w, h)
+            self.w_var.set(s)
+            self.h_var.set(s)
+            self.w_opt.set(str(s))
+            self.h_opt.set(str(s))
+            w, h = s, s
+            for y in range(h):
+                for x in range(w):
+                    self._grid[y][x] = 1
+            return
+
+        if shape == "Retângulo":
+            for y in range(h):
+                for x in range(w):
+                    self._grid[y][x] = 1
+            return
+
+        if shape == "Redondo":
+            # círculo inscrito em w x h (elipse). Para casos não-quadrados.
+            cx = (w - 1) / 2.0
+            cy = (h - 1) / 2.0
+            rx = (w - 1) / 2.0 if w > 1 else 0.5
+            ry = (h - 1) / 2.0 if h > 1 else 0.5
+            for y in range(h):
+                for x in range(w):
+                    if rx <= 0 or ry <= 0:
+                        inside = True
+                    else:
+                        nx = (x - cx) / rx
+                        ny = (y - cy) / ry
+                        inside = (nx * nx + ny * ny) <= 1.0 + 1e-6
+                    self._grid[y][x] = 1 if inside else 0
+            return
+
+        # Personalizado: não mexe
+
+    def _on_canvas_click(self, event: tk.Event) -> None:
+        cell = 48
+        x = int(event.x // cell)
+        y = int(event.y // cell)
+        w, h = self.w_var.get(), self.h_var.get()
+        if 0 <= x < w and 0 <= y < h:
+            self._grid[y][x] = 0 if self._grid[y][x] else 1
+            self.shape_var.set("Personalizado")
+            self.shape_opt.set("Personalizado")
+            self._redraw()
+
+    def _redraw(self) -> None:
+        self.canvas.delete("all")
+        cell = 48
+        w, h = self.w_var.get(), self.h_var.get()
+
+        for y in range(8):
+            for x in range(8):
+                x0, y0 = x * cell, y * cell
+                fill = "#1A1A1A"
+                outline = "#2A2A2A"
+                if x < w and y < h:
+                    fill = "#2B6CB0" if self._grid[y][x] else "#111111"
+                    outline = "#3A3A3A"
+                self.canvas.create_rectangle(x0, y0, x0 + cell, y0 + cell, fill=fill, outline=outline, width=2)
+
+        # borda do tamanho ativo
+        self.canvas.create_rectangle(0, 0, w * cell, h * cell, outline="#FFFFFF", width=2)
+
+    def _to_brush(self) -> Brush:
+        w, h = self.w_var.get(), self.h_var.get()
+        rows: List[int] = []
+        for y in range(h):
+            r = 0
+            for x in range(w):
+                if self._grid[y][x]:
+                    r |= 1 << (w - 1 - x)
+            rows.append(r)
+        br = Brush(id=None, name="(sem nome)", width=w, height=h, rows=rows)
+        br.validate()
+        return br
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def _ok(self) -> None:
+        try:
+            self._result = self._to_brush()
+        except Exception as e:
+            messagebox.showerror("Erro", f"Pincel inválido: {e}")
+            return
+        self.destroy()
+
+
+# ----------------------------
 # UI
 # ----------------------------
 class SpriteEditorApp(ctk.CTk):
@@ -408,25 +803,104 @@ class SpriteEditorApp(ctk.CTk):
         self.current_color_index: int = 15  # default white
 
         # ============================
-        # Controle de "alterações pendentes" (dirty) do ÚLTIMO PROJETO CARREGADO
+        # Dirty tracking
         # ============================
         self.last_loaded_project_id: Optional[int] = None
         self.last_loaded_project_name: Optional[str] = None
-        self._baseline_signature: Optional[int] = None  # assinatura do estado "salvo/carregado"
+        self._baseline_signature: Optional[int] = None
 
         # ============================
-        # Ferramentas de desenho (editor)
+        # Ferramentas
         # ============================
         self.tool_mode: str = "pencil"  # "pencil" | "line"
         self._line_start: Optional[Tuple[int, int]] = None
         self._line_current: Optional[Tuple[int, int]] = None
         self._line_value: int = 1
 
+        # pintura com pincel (arrasto)
+        self._is_painting: bool = False
+        self._paint_value: int = 1
+        self._last_paint_xy: Optional[Tuple[int, int]] = None
+
+        # ============================
+        # Pincéis
+        # ============================
+        self.brushes: List[Brush] = []
+        self.active_brush: Brush = Brush(id=None, name="1x1 (pixel)", width=1, height=1, rows=[0b1])
+
         self._build_layout()
+        self._load_brushes()
         self._reset_project(size=8)
 
-        # Captura fechamento pela janela (X)
         self.protocol("WM_DELETE_WINDOW", self._request_exit)
+
+    # ----------------------------
+    # Brushes
+    # ----------------------------
+    def _load_brushes(self) -> None:
+        try:
+            self.brushes = self.db.list_brushes()
+        except Exception as e:
+            self.brushes = []
+            self.status_label.configure(text=f"Falha ao carregar pincéis: {e}")
+            return
+
+        names = [b.name for b in self.brushes] if self.brushes else ["1x1 (pixel)"]
+        self.brush_menu.configure(values=names)
+
+        # tenta manter seleção atual, senão escolhe o primeiro
+        current_name = self.active_brush.name
+        pick = current_name if current_name in names else names[0]
+        self.brush_menu.set(pick)
+        self._on_brush_selected(pick)
+
+    def _on_brush_selected(self, name: str) -> None:
+        for b in self.brushes:
+            if b.name == name:
+                self.active_brush = b
+                self.status_label.configure(text=f"Pincel selecionado: {b.name} ({b.width}x{b.height})")
+                return
+        # fallback
+        self.active_brush = Brush(id=None, name="1x1 (pixel)", width=1, height=1, rows=[0b1])
+
+    def _open_brush_editor(self) -> None:
+        dlg = BrushEditorDialog(self, initial=self.active_brush)
+        self.wait_window(dlg)
+        br = dlg.result()
+        if br is None:
+            return
+
+        # aplica imediatamente (sem salvar ainda)
+        self.active_brush = br
+        temp_name = f"Temp {br.width}x{br.height}"
+        self.brush_menu.set(temp_name)
+        self.status_label.configure(text=f"Pincel editado (não salvo): {br.width}x{br.height}")
+
+    def _save_active_brush(self) -> None:
+        br = self.active_brush
+        try:
+            br.validate()
+        except Exception as e:
+            messagebox.showerror("Erro", f"Pincel inválido: {e}")
+            return
+
+        name = simpledialog.askstring("Salvar pincel", "Nome do pincel:", initialvalue=br.name if br.name else "")
+        if not name:
+            return
+
+        try:
+            bid = self.db.save_brush(name=name, width=br.width, height=br.height, rows=br.rows, user_defined=True)
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Erro", "Já existe um pincel com esse nome.")
+            return
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao salvar pincel: {e}")
+            return
+
+        self._load_brushes()
+        self.brush_menu.set(name)
+        self._on_brush_selected(name)
+        self.status_label.configure(text=f"Pincel salvo: {name} (id={bid})")
 
     # ----------------------------
     # Dirty tracking
@@ -451,13 +925,11 @@ class SpriteEditorApp(ctk.CTk):
     def _touch_change(self) -> None:
         if self.last_loaded_project_id is None:
             return
-        # baseline não muda aqui; serve para detectar mudanças
 
     # ----------------------------
-    # UI
+    # UI layout
     # ----------------------------
     def _build_layout(self) -> None:
-        # Top bar
         top = ctk.CTkFrame(self)
         top.pack(side="top", fill="x", padx=10, pady=10)
 
@@ -491,16 +963,13 @@ class SpriteEditorApp(ctk.CTk):
         ctk.CTkButton(top, text="Salvar Projeto (SQLite)", command=self._save_project).pack(side="left", padx=8)
         ctk.CTkButton(top, text="Carregar Projeto (SQLite)", command=self._open_load_dialog).pack(side="left", padx=8)
 
-        # Botão de saída
         ctk.CTkButton(
             top, text="Sair", fg_color="#8B2C2C", hover_color="#A63A3A", command=self._request_exit
         ).pack(side="right", padx=8)
 
-        # Main split
         main = ctk.CTkFrame(self)
         main.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Left: sprite table (thumbnails)
         left = ctk.CTkFrame(main)
         left.pack(side="left", fill="y", padx=(0, 10), pady=10)
 
@@ -510,16 +979,12 @@ class SpriteEditorApp(ctk.CTk):
         self.scroll = ctk.CTkScrollableFrame(left, width=420, height=650)
         self.scroll.pack(side="top", fill="y", padx=10, pady=(0, 10))
 
-        # Right: editor + palette + preview
         right = ctk.CTkFrame(main)
         right.pack(side="left", fill="both", expand=True, pady=10)
 
         editor_row = ctk.CTkFrame(right)
         editor_row.pack(side="top", fill="x", padx=10, pady=10)
 
-        # ============================
-        # Editor container + toolbar
-        # ============================
         editor_container = ctk.CTkFrame(editor_row)
         editor_container.pack(side="left", padx=(0, 10), pady=0)
 
@@ -537,18 +1002,26 @@ class SpriteEditorApp(ctk.CTk):
         self.btn_tool_line = ctk.CTkButton(
             editor_toolbar, text="／", width=38, height=32, command=self._set_tool_line
         )
-        self.btn_tool_line.pack(side="left", padx=(0, 6), pady=6)
+        self.btn_tool_line.pack(side="left", padx=(0, 12), pady=6)
 
-        # Guarda cores padrão do tema (evita fg_color=None)
+        # --- UI de pincel ---
+        ctk.CTkLabel(editor_toolbar, text="Pincel:").pack(side="left", padx=(0, 6))
+        self.brush_menu = ctk.CTkOptionMenu(editor_toolbar, values=["1x1 (pixel)"], command=self._on_brush_selected)
+        self.brush_menu.pack(side="left", padx=(0, 6), pady=6)
+
+        ctk.CTkButton(editor_toolbar, text="Editar", width=68, command=self._open_brush_editor).pack(
+            side="left", padx=(0, 6), pady=6
+        )
+        ctk.CTkButton(editor_toolbar, text="Salvar", width=68, command=self._save_active_brush).pack(
+            side="left", padx=(0, 10), pady=6
+        )
+
         self._tool_btn_default_fg = self.btn_tool_pencil.cget("fg_color")
         self._tool_btn_default_hover = self.btn_tool_pencil.cget("hover_color")
 
         self.overlay_hint_label = ctk.CTkLabel(editor_toolbar, text="")
         self.overlay_hint_label.pack(side="right", padx=8, pady=6)
 
-        # ============================
-        # Editor canvas
-        # ============================
         self.editor_canvas = tk.Canvas(
             editor_container,
             width=820,
@@ -559,12 +1032,18 @@ class SpriteEditorApp(ctk.CTk):
         self.editor_canvas.grid(row=1, column=0, sticky="nsew")
         editor_container.grid_rowconfigure(1, weight=1)
 
-        self.editor_canvas.bind("<Button-1>", lambda e: self._on_editor_click(e, value=1))
-        self.editor_canvas.bind("<Button-3>", lambda e: self._on_editor_click(e, value=0))
+        # Bindings: pintura com arrasto + linha
+        self.editor_canvas.bind("<ButtonPress-1>", lambda e: self._on_editor_press(e, value=1))
+        self.editor_canvas.bind("<B1-Motion>", self._on_editor_drag)
+        self.editor_canvas.bind("<ButtonRelease-1>", self._on_editor_release)
+
+        self.editor_canvas.bind("<ButtonPress-3>", lambda e: self._on_editor_press(e, value=0))
+        self.editor_canvas.bind("<B3-Motion>", self._on_editor_drag)
+        self.editor_canvas.bind("<ButtonRelease-3>", self._on_editor_release)
+
         self.editor_canvas.bind("<Motion>", self._on_editor_motion)
         self.editor_canvas.bind("<Leave>", lambda _e: self._clear_line_preview())
 
-        # Side panel: palette + preview
         side = ctk.CTkFrame(editor_row)
         side.pack(side="left", fill="both", expand=True)
 
@@ -617,14 +1096,18 @@ class SpriteEditorApp(ctk.CTk):
         self.tool_mode = "pencil"
         self._line_start = None
         self._line_current = None
+        self._is_painting = False
+        self._last_paint_xy = None
         self._clear_line_preview()
         self._update_tool_buttons()
-        self.status_label.configure(text="Ferramenta: Lápis (ponto a ponto)")
+        self.status_label.configure(text="Ferramenta: Pincel (clique e arraste). Botão direito apaga.")
 
     def _set_tool_line(self) -> None:
         self.tool_mode = "line"
         self._line_start = None
         self._line_current = None
+        self._is_painting = False
+        self._last_paint_xy = None
         self._clear_line_preview()
         self._update_tool_buttons()
         self.status_label.configure(text="Ferramenta: Reta (clique início, mova, clique fim)")
@@ -693,6 +1176,15 @@ class SpriteEditorApp(ctk.CTk):
         elif mode == "overlay":
             self._edit_overlay(x, y, value)
 
+    def _apply_brush_in_mode(self, x: int, y: int, value: int) -> None:
+        w, h = self._editor_dims()
+        pts = self.active_brush.points_centered()
+        for dx, dy in pts:
+            xx = x + dx
+            yy = y + dy
+            if 0 <= xx < w and 0 <= yy < h:
+                self._apply_point_in_mode(xx, yy, value)
+
     def _commit_line(self, start: Tuple[int, int], end: Tuple[int, int], value: int) -> None:
         pts = self._bresenham_line(start[0], start[1], end[0], end[1])
         for x, y in pts:
@@ -714,6 +1206,84 @@ class SpriteEditorApp(ctk.CTk):
                 width=2,
                 tags=("tool_preview",),
             )
+
+    # ============================
+    # Pintura / eventos do editor
+    # ============================
+    def _on_editor_press(self, event: tk.Event, value: int) -> None:
+        pos = self._event_to_editor_xy(event)
+        if pos is None:
+            return
+
+        # linha: usa clique-início / clique-fim (sem arrasto)
+        if self.tool_mode == "line":
+            if self._get_edit_mode() == "2x2" and not self._get_2x2_indices():
+                self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
+                return
+
+            if self._line_start is None:
+                self._line_start = pos
+                self._line_current = pos
+                self._line_value = value
+                self._draw_line_preview(self._line_start, self._line_current)
+                return
+
+            end = pos
+            self._commit_line(self._line_start, end, self._line_value)
+            self._line_start = None
+            self._line_current = None
+            self._clear_line_preview()
+            self._touch_change()
+            self._redraw_all()
+            return
+
+        # pincel
+        if self.tool_mode == "pencil":
+            mode = self._get_edit_mode()
+            if mode == "2x2" and not self._get_2x2_indices():
+                self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
+                return
+
+            self._is_painting = True
+            self._paint_value = value
+            self._last_paint_xy = pos
+
+            x, y = pos
+            self._apply_brush_in_mode(x, y, value)
+            self._touch_change()
+            self._redraw_all()
+
+    def _on_editor_drag(self, event: tk.Event) -> None:
+        if self.tool_mode != "pencil":
+            return
+        if not self._is_painting:
+            return
+
+        pos = self._event_to_editor_xy(event)
+        if pos is None:
+            return
+
+        if pos == self._last_paint_xy:
+            return
+
+        # “liga” os pontos entre o último e o atual para não ficar falhado no arrasto
+        if self._last_paint_xy is not None:
+            x0, y0 = self._last_paint_xy
+            x1, y1 = pos
+            for x, y in self._bresenham_line(x0, y0, x1, y1):
+                self._apply_brush_in_mode(x, y, self._paint_value)
+        else:
+            x, y = pos
+            self._apply_brush_in_mode(x, y, self._paint_value)
+
+        self._last_paint_xy = pos
+        self._touch_change()
+        self._redraw_all()
+
+    def _on_editor_release(self, _event: tk.Event) -> None:
+        if self.tool_mode == "pencil":
+            self._is_painting = False
+            self._last_paint_xy = None
 
     def _on_editor_motion(self, event: tk.Event) -> None:
         if self.tool_mode != "line":
@@ -759,6 +1329,8 @@ class SpriteEditorApp(ctk.CTk):
         self.tool_mode = "pencil"
         self._line_start = None
         self._line_current = None
+        self._is_painting = False
+        self._last_paint_xy = None
         self._clear_line_preview()
         self._update_tool_buttons()
 
@@ -832,56 +1404,8 @@ class SpriteEditorApp(ctk.CTk):
         return [self.selected_sprite_index]
 
     # ============================
-    # Editor input
+    # Edição de pixel (modos)
     # ============================
-    def _on_editor_click(self, event: tk.Event, value: int) -> None:
-        pos = self._event_to_editor_xy(event)
-        if pos is None:
-            return
-
-        if self.tool_mode == "pencil":
-            mode = self._get_edit_mode()
-
-            if mode == "2x2" and not self._get_2x2_indices():
-                self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
-                return
-
-            x, y = pos
-            if mode == "single":
-                self._edit_single(self.selected_sprite_index, x, y, value)
-            elif mode == "2x2":
-                self._edit_2x2(x, y, value)
-            elif mode == "overlay":
-                self._edit_overlay(x, y, value)
-            else:
-                return
-
-            self._touch_change()
-            self._redraw_all()
-            return
-
-        if self.tool_mode == "line":
-            if self._get_edit_mode() == "2x2" and not self._get_2x2_indices():
-                self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
-                return
-
-            if self._line_start is None:
-                self._line_start = pos
-                self._line_current = pos
-                self._line_value = value
-                self._draw_line_preview(self._line_start, self._line_current)
-                return
-
-            end = pos
-            self._commit_line(self._line_start, end, self._line_value)
-            self._line_start = None
-            self._line_current = None
-            self._clear_line_preview()
-
-            self._touch_change()
-            self._redraw_all()
-            return
-
     def _edit_single(self, sp_idx: int, x: int, y: int, value: int) -> None:
         sp = self.sprites[sp_idx]
         sp.color_index = self.current_color_index
@@ -1139,7 +1663,7 @@ class SpriteEditorApp(ctk.CTk):
         return self._save_project_with_name(self.last_loaded_project_name, update_last_loaded=True)
 
     # ============================
-    # Carregar projeto (UI + DB)
+    # Carregar projeto
     # ============================
     @staticmethod
     def _format_dt(ts: int) -> str:
@@ -1163,6 +1687,8 @@ class SpriteEditorApp(ctk.CTk):
         self.tool_mode = "pencil"
         self._line_start = None
         self._line_current = None
+        self._is_painting = False
+        self._last_paint_xy = None
         self._clear_line_preview()
         self._update_tool_buttons()
 
