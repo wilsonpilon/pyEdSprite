@@ -63,6 +63,10 @@ As ferramentas respeitam:
 
 Ferramentas disponíveis:
 - **Pincel (brush):** clique e arraste
+- **Borracha:** clique e arraste (com forma/tamanho configuráveis)
+- **Preencher área (FILL / balde):** clique para preencher a **região conectada** (4-direções) de pixels com o mesmo valor:
+  - Clique em uma área vazia (`0`) com botão esquerdo para preencher com `1` até encontrar o “contorno” (pixels ligados).
+  - Clique com botão direito para fazer o inverso (apagar uma região conectada de `1`).
 - **Reta:** clique início → mova → clique fim (com preview)
 - **Retângulo (contorno):** clique início → mova → clique fim
 - **Retângulo preenchido:** clique início → mova → clique fim
@@ -142,12 +146,9 @@ Empilha visualmente 4 sprites (bloco 2x2) na mesma área **(mesmo tamanho do spr
 
 Crie/ative um ambiente virtual e instale dependências:
 bash pip install -r requirements.txt
-
 Depois:
 bash python main.py
-
----
-
+----
 ## Notas rápidas de uso
 
 - **Botão esquerdo** desenha e **botão direito** apaga (em qualquer ferramenta).
