@@ -1,6 +1,6 @@
 # pyEdSprite
 
-Editor de sprites **MSX1** (estilo **TMS9918A**) feito em **Python** com interface gráfica, pensado como um MVP simples e direto: desenhe sprites **8x8** ou **16x16**, escolha a cor (1 cor por sprite, como no MSX1), visualize miniaturas em grade e salve tudo em **SQLite**.
+Editor de sprites **MSX1** (estilo **TMS9918A**) feito em **Python** com interface gráfica (**Tkinter + CustomTkinter**), pensado como um MVP simples e direto: desenhe sprites **8x8** ou **16x16**, escolha a cor (**1 cor por sprite**, como no MSX1), visualize miniaturas em grade, edite com ferramentas e salve tudo em **SQLite** (`sprites.db`).
 
 ---
 
@@ -26,21 +26,67 @@ O MSX1 trabalha com sprites com limitações bem específicas (tamanho fixo, **1
 - criar e editar sprites rapidamente;
 - montar sprites maiores a partir de blocos (2x2);
 - simular composição por “camadas” (overlay);
+- ter ferramentas básicas de desenho (linha, formas, pincéis);
+- aplicar deslocamentos úteis (wrap/buffer) e desfazer;
 - manter projetos salvos localmente sem complicação (SQLite).
 
 ---
 
-## Funcionalidades
+## Funcionalidades (até o momento)
 
+### Tamanhos / paleta
 - **Tamanhos de sprite:** `8x8` e `16x16`
 - **Paleta MSX1 (16 cores):** seleção por índice `0..15`
   - Observação: o índice `0` costuma ser “transparente” em MSX; aqui é exibido como preto para visualização.
+
+### Grade / preview
 - **Grade de sprites com miniaturas** (seleção por clique)
-- **Editor com grid** (clique para ligar/desligar pixels)
-  - Botão esquerdo: desenha (pixel ligado)
-  - Botão direito: apaga (pixel desligado)
+- **Editor com grid** (visualização ampliada)
 - **Preview 2x** do sprite (ou composição, conforme modo)
+
+### Persistência (SQLite)
 - **Salvar projeto em SQLite** (`sprites.db`)
+- **Carregar projeto** por lista (com preview do primeiro sprite)
+
+### Pincéis
+- Seleção de pincel por lista (padrões + salvos)
+- **Editor de pincel** (até **8x8**) com:
+  - formas rápidas: **Quadrado**, **Retângulo**, **Redondo** (elipse/círculo)
+  - modo **Personalizado** (clique para ligar/desligar células)
+  - ações: **Preencher**, **Limpar**, **Inverter**
+- **Salvar pincel** no SQLite (tabela `brushes`)
+
+### Ferramentas de desenho
+As ferramentas respeitam:
+- **Botão esquerdo:** desenha (liga pixel)
+- **Botão direito:** apaga (desliga pixel)
+
+Ferramentas disponíveis:
+- **Pincel (brush):** clique e arraste
+- **Reta:** clique início → mova → clique fim (com preview)
+- **Retângulo (contorno):** clique início → mova → clique fim
+- **Retângulo preenchido:** clique início → mova → clique fim
+- **Elipse/Círculo (contorno):** clique início → mova → clique fim
+- **Elipse/Círculo preenchido:** clique início → mova → clique fim
+
+### Deslocamento (Shift) + Undo
+Na barra do editor existem controles de deslocamento com 2 modos:
+
+#### 1) `wrap` (rotacionar)
+- O que “sai” de um lado **entra do outro** (wrap-around).
+- Suporta: esquerda/direita/cima/baixo.
+
+#### 2) `buffer` (deslocar com memória)
+- O que “sai” **não volta automaticamente**; entra `0` (vazio) no lado oposto.
+- Porém, as linhas/colunas removidas ficam guardadas em **buffers por direção** (por sprite).
+- Ao deslocar no **sentido oposto**, o conteúdo pode **voltar** (LIFO).
+- Capacidade do buffer:
+  - **8x8:** guarda até **8** linhas/colunas
+  - **16x16:** guarda até **16** linhas/colunas
+
+#### Desfazer (undo)
+- Botão **Desfazer** com **1 nível**
+- Restaura o sprite para o estado imediatamente anterior (bitmap, cor e buffers do modo `buffer`).
 
 ---
 
@@ -60,6 +106,7 @@ Edita um bloco **2x2** de sprites adjacentes como se fosse um sprite maior:
 Empilha visualmente 4 sprites (bloco 2x2) na mesma área **(mesmo tamanho do sprite)**:
 - O preview mostra a composição das 4 “camadas”
 - Você escolhe qual camada editar (1 a 4) no seletor “Overlay: editar sprite”
+- Deslocamento/undo também respeitam a camada ativa (no modo overlay)
 
 ---
 
@@ -72,17 +119,37 @@ Empilha visualmente 4 sprites (bloco 2x2) na mesma área **(mesmo tamanho do spr
   - `rows` (máscaras de bits por linha)
 - Ao salvar:
   - Cria/atualiza um registro do projeto
-  - Armazena cada sprite como **BLOB** no SQLite
+  - Armazena cada sprite como **BLOB** no SQLite:
     - `8x8`: 8 bytes (1 byte por linha)
     - `16x16`: 32 bytes (2 bytes por linha)
+- Pincéis (brushes) são armazenados na tabela `brushes` com máscara em BLOB (até 8x8).
 
 ---
 
 ## Requisitos
 
-- **Python 3.14+** (o projeto foi pensado para rodar com Python moderno)
+- **Python 3.14+**
 - Biblioteca padrão:
   - `tkinter` (GUI)
   - `sqlite3` (persistência)
-- Dependência externa:
+- Dependências externas:
   - `customtkinter`
+  - `pillow` (listado em `requirements.txt`, mas a splashscreen atual funciona sem Pillow usando `tk.PhotoImage`)
+
+---
+
+## Como executar
+
+Crie/ative um ambiente virtual e instale dependências:
+bash pip install -r requirements.txt
+
+Depois:
+bash python main.py
+
+---
+
+## Notas rápidas de uso
+
+- **Botão esquerdo** desenha e **botão direito** apaga (em qualquer ferramenta).
+- Ferramentas de forma (reta/retângulo/elipse) funcionam com **2 cliques** (início e fim) e mostram **preview** em branco.
+- Use `wrap` para “rolar” o sprite, e `buffer` para empurrar e poder “trazer de volta” ao deslocar no sentido contrário.

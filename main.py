@@ -210,12 +210,6 @@ class Brush:
     @staticmethod
     def square(name: str, size: int) -> "Brush":
         size = max(1, min(8, int(size)))
-        rows = [(1 << size) - 1 for _ in range(size)]
-        # alinhar bits à esquerda (MSB-first dentro da largura)
-        rows = [r << (8 - size) for r in rows]  # temporário 8-bit
-        # recompacta para "width bits" à esquerda (usaremos width ao ler)
-        # Aqui guardamos já na convenção width-bit MSB: vamos converter para width bits
-        # removendo o shift extra:
         rows = [((1 << size) - 1) for _ in range(size)]
         return Brush(id=None, name=name, width=size, height=size, rows=rows)
 
@@ -245,9 +239,9 @@ class Brush:
 # ----------------------------
 @dataclass
 class Sprite:
-    size: int                 # 8 or 16
-    color_index: int          # 0..15 (MSX1 sprite color)
-    rows: List[int]           # bitmask per row; width bits used
+    size: int  # 8 or 16
+    color_index: int  # 0..15 (MSX1 sprite color)
+    rows: List[int]  # bitmask per row; width bits used
 
     @staticmethod
     def empty(size: int, color_index: int = 15) -> "Sprite":
@@ -610,7 +604,9 @@ class BrushEditorDialog(ctk.CTkToplevel):
         mid = ctk.CTkFrame(self)
         mid.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 12))
 
-        ctk.CTkLabel(mid, text="Clique para ligar/desligar células do pincel:").pack(side="top", anchor="w", pady=(10, 8))
+        ctk.CTkLabel(mid, text="Clique para ligar/desligar células do pincel:").pack(
+            side="top", anchor="w", pady=(10, 8)
+        )
 
         self.canvas = tk.Canvas(mid, width=8 * 48, height=8 * 48, bg="#111111", highlightthickness=0)
         self.canvas.pack(side="top", pady=(0, 10))
@@ -707,7 +703,7 @@ class BrushEditorDialog(ctk.CTkToplevel):
             return
 
         if shape == "Redondo":
-            # círculo inscrito em w x h (elipse). Para casos não-quadrados.
+            # círculo inscrito em w x h (elipse)
             cx = (w - 1) / 2.0
             cy = (h - 1) / 2.0
             rx = (w - 1) / 2.0 if w > 1 else 0.5
@@ -751,7 +747,6 @@ class BrushEditorDialog(ctk.CTkToplevel):
                     outline = "#3A3A3A"
                 self.canvas.create_rectangle(x0, y0, x0 + cell, y0 + cell, fill=fill, outline=outline, width=2)
 
-        # borda do tamanho ativo
         self.canvas.create_rectangle(0, 0, w * cell, h * cell, outline="#FFFFFF", width=2)
 
     def _to_brush(self) -> Brush:
@@ -798,7 +793,7 @@ class SpriteEditorApp(ctk.CTk):
         self.selected_sprite_index: int = 0
 
         self.edit_mode = tk.StringVar(value="single")  # single | 2x2 | overlay
-        self.overlay_active = tk.IntVar(value=0)        # which of the 4 sprites is edited in overlay (0..3)
+        self.overlay_active = tk.IntVar(value=0)  # which of the 4 sprites is edited in overlay (0..3)
 
         self.current_color_index: int = 15  # default white
 
@@ -812,15 +807,32 @@ class SpriteEditorApp(ctk.CTk):
         # ============================
         # Ferramentas
         # ============================
-        self.tool_mode: str = "pencil"  # "pencil" | "line"
-        self._line_start: Optional[Tuple[int, int]] = None
-        self._line_current: Optional[Tuple[int, int]] = None
-        self._line_value: int = 1
+        # pencil | line | rect | rect_fill | ellipse | ellipse_fill
+        self.tool_mode: str = "pencil"
+
+        # formas (reta/retângulo/elipse): clique início, mover, clique fim
+        self._shape_start: Optional[Tuple[int, int]] = None
+        self._shape_current: Optional[Tuple[int, int]] = None
+        self._shape_value: int = 1
 
         # pintura com pincel (arrasto)
         self._is_painting: bool = False
         self._paint_value: int = 1
         self._last_paint_xy: Optional[Tuple[int, int]] = None
+
+        # ============================
+        # Deslocamento + buffers + undo
+        # ============================
+        # shift_mode: "wrap" (rotaciona) | "buffer" (desloca e guarda linhas/colunas)
+        self.shift_mode = tk.StringVar(value="wrap")
+
+        # buffers por sprite (apenas para modo "buffer"):
+        #   left/right guardam colunas (int com size bits de cima->baixo)
+        #   up/down guardam linhas (int com size bits esquerda->direita)
+        self._shift_buffers: Dict[int, Dict[str, List[int]]] = {}
+
+        # undo (1 nível) por sprite: snapshot de rows + cor + buffers
+        self._undo_snapshot: Dict[int, Dict[str, Any]] = {}
 
         # ============================
         # Pincéis
@@ -848,7 +860,6 @@ class SpriteEditorApp(ctk.CTk):
         names = [b.name for b in self.brushes] if self.brushes else ["1x1 (pixel)"]
         self.brush_menu.configure(values=names)
 
-        # tenta manter seleção atual, senão escolhe o primeiro
         current_name = self.active_brush.name
         pick = current_name if current_name in names else names[0]
         self.brush_menu.set(pick)
@@ -860,7 +871,6 @@ class SpriteEditorApp(ctk.CTk):
                 self.active_brush = b
                 self.status_label.configure(text=f"Pincel selecionado: {b.name} ({b.width}x{b.height})")
                 return
-        # fallback
         self.active_brush = Brush(id=None, name="1x1 (pixel)", width=1, height=1, rows=[0b1])
 
     def _open_brush_editor(self) -> None:
@@ -870,7 +880,6 @@ class SpriteEditorApp(ctk.CTk):
         if br is None:
             return
 
-        # aplica imediatamente (sem salvar ainda)
         self.active_brush = br
         temp_name = f"Temp {br.width}x{br.height}"
         self.brush_menu.set(temp_name)
@@ -1002,9 +1011,28 @@ class SpriteEditorApp(ctk.CTk):
         self.btn_tool_line = ctk.CTkButton(
             editor_toolbar, text="／", width=38, height=32, command=self._set_tool_line
         )
-        self.btn_tool_line.pack(side="left", padx=(0, 12), pady=6)
+        self.btn_tool_line.pack(side="left", padx=(0, 6), pady=6)
 
-        # --- UI de pincel ---
+        self.btn_tool_rect = ctk.CTkButton(
+            editor_toolbar, text="▭", width=38, height=32, command=self._set_tool_rect
+        )
+        self.btn_tool_rect.pack(side="left", padx=(0, 6), pady=6)
+
+        self.btn_tool_rect_fill = ctk.CTkButton(
+            editor_toolbar, text="▮", width=38, height=32, command=self._set_tool_rect_fill
+        )
+        self.btn_tool_rect_fill.pack(side="left", padx=(0, 6), pady=6)
+
+        self.btn_tool_ellipse = ctk.CTkButton(
+            editor_toolbar, text="◯", width=38, height=32, command=self._set_tool_ellipse
+        )
+        self.btn_tool_ellipse.pack(side="left", padx=(0, 6), pady=6)
+
+        self.btn_tool_ellipse_fill = ctk.CTkButton(
+            editor_toolbar, text="⬤", width=38, height=32, command=self._set_tool_ellipse_fill
+        )
+        self.btn_tool_ellipse_fill.pack(side="left", padx=(0, 12), pady=6)
+
         ctk.CTkLabel(editor_toolbar, text="Pincel:").pack(side="left", padx=(0, 6))
         self.brush_menu = ctk.CTkOptionMenu(editor_toolbar, values=["1x1 (pixel)"], command=self._on_brush_selected)
         self.brush_menu.pack(side="left", padx=(0, 6), pady=6)
@@ -1015,6 +1043,33 @@ class SpriteEditorApp(ctk.CTk):
         ctk.CTkButton(editor_toolbar, text="Salvar", width=68, command=self._save_active_brush).pack(
             side="left", padx=(0, 10), pady=6
         )
+
+        # --- Deslocamento + undo ---
+        ctk.CTkLabel(editor_toolbar, text="Deslocar:").pack(side="left", padx=(6, 6))
+
+        self.shift_mode_seg = ctk.CTkSegmentedButton(
+            editor_toolbar,
+            values=["wrap", "buffer"],
+            command=self._on_shift_mode_changed,
+            width=160,
+        )
+        self.shift_mode_seg.set("wrap")
+        self.shift_mode_seg.pack(side="left", padx=(0, 10), pady=6)
+
+        self.btn_shift_up = ctk.CTkButton(editor_toolbar, text="↑", width=34, height=32, command=lambda: self._shift("up"))
+        self.btn_shift_up.pack(side="left", padx=(0, 4), pady=6)
+
+        self.btn_shift_left = ctk.CTkButton(editor_toolbar, text="←", width=34, height=32, command=lambda: self._shift("left"))
+        self.btn_shift_left.pack(side="left", padx=(0, 4), pady=6)
+
+        self.btn_shift_right = ctk.CTkButton(editor_toolbar, text="→", width=34, height=32, command=lambda: self._shift("right"))
+        self.btn_shift_right.pack(side="left", padx=(0, 4), pady=6)
+
+        self.btn_shift_down = ctk.CTkButton(editor_toolbar, text="↓", width=34, height=32, command=lambda: self._shift("down"))
+        self.btn_shift_down.pack(side="left", padx=(0, 10), pady=6)
+
+        self.btn_undo = ctk.CTkButton(editor_toolbar, text="Desfazer", width=90, command=self._undo)
+        self.btn_undo.pack(side="left", padx=(0, 10), pady=6)
 
         self._tool_btn_default_fg = self.btn_tool_pencil.cget("fg_color")
         self._tool_btn_default_hover = self.btn_tool_pencil.cget("hover_color")
@@ -1032,7 +1087,7 @@ class SpriteEditorApp(ctk.CTk):
         self.editor_canvas.grid(row=1, column=0, sticky="nsew")
         editor_container.grid_rowconfigure(1, weight=1)
 
-        # Bindings: pintura com arrasto + linha
+        # Bindings
         self.editor_canvas.bind("<ButtonPress-1>", lambda e: self._on_editor_press(e, value=1))
         self.editor_canvas.bind("<B1-Motion>", self._on_editor_drag)
         self.editor_canvas.bind("<ButtonRelease-1>", self._on_editor_release)
@@ -1042,7 +1097,7 @@ class SpriteEditorApp(ctk.CTk):
         self.editor_canvas.bind("<ButtonRelease-3>", self._on_editor_release)
 
         self.editor_canvas.bind("<Motion>", self._on_editor_motion)
-        self.editor_canvas.bind("<Leave>", lambda _e: self._clear_line_preview())
+        self.editor_canvas.bind("<Leave>", lambda _e: self._clear_tool_preview())
 
         side = ctk.CTkFrame(editor_row)
         side.pack(side="left", fill="both", expand=True)
@@ -1092,40 +1147,271 @@ class SpriteEditorApp(ctk.CTk):
     # ============================
     # Ferramentas
     # ============================
+    def _reset_shape_state(self) -> None:
+        self._shape_start = None
+        self._shape_current = None
+        self._shape_value = 1
+        self._clear_tool_preview()
+
     def _set_tool_pencil(self) -> None:
         self.tool_mode = "pencil"
-        self._line_start = None
-        self._line_current = None
+        self._reset_shape_state()
         self._is_painting = False
         self._last_paint_xy = None
-        self._clear_line_preview()
         self._update_tool_buttons()
         self.status_label.configure(text="Ferramenta: Pincel (clique e arraste). Botão direito apaga.")
 
     def _set_tool_line(self) -> None:
         self.tool_mode = "line"
-        self._line_start = None
-        self._line_current = None
+        self._reset_shape_state()
         self._is_painting = False
         self._last_paint_xy = None
-        self._clear_line_preview()
         self._update_tool_buttons()
-        self.status_label.configure(text="Ferramenta: Reta (clique início, mova, clique fim)")
+        self.status_label.configure(text="Ferramenta: Reta (clique início, mova, clique fim). Botão direito apaga.")
+
+    def _set_tool_rect(self) -> None:
+        self.tool_mode = "rect"
+        self._reset_shape_state()
+        self._is_painting = False
+        self._last_paint_xy = None
+        self._update_tool_buttons()
+        self.status_label.configure(text="Ferramenta: Retângulo (contorno). Clique início, mova, clique fim.")
+
+    def _set_tool_rect_fill(self) -> None:
+        self.tool_mode = "rect_fill"
+        self._reset_shape_state()
+        self._is_painting = False
+        self._last_paint_xy = None
+        self._update_tool_buttons()
+        self.status_label.configure(text="Ferramenta: Retângulo preenchido. Clique início, mova, clique fim.")
+
+    def _set_tool_ellipse(self) -> None:
+        self.tool_mode = "ellipse"
+        self._reset_shape_state()
+        self._is_painting = False
+        self._last_paint_xy = None
+        self._update_tool_buttons()
+        self.status_label.configure(text="Ferramenta: Elipse/Círculo (contorno). Clique início, mova, clique fim.")
+
+    def _set_tool_ellipse_fill(self) -> None:
+        self.tool_mode = "ellipse_fill"
+        self._reset_shape_state()
+        self._is_painting = False
+        self._last_paint_xy = None
+        self._update_tool_buttons()
+        self.status_label.configure(text="Ferramenta: Elipse/Círculo preenchido. Clique início, mova, clique fim.")
 
     def _update_tool_buttons(self) -> None:
         active = "#2B6CB0"
         default_fg = getattr(self, "_tool_btn_default_fg", "transparent")
         default_hover = getattr(self, "_tool_btn_default_hover", None)
 
-        if self.tool_mode == "pencil":
-            self.btn_tool_pencil.configure(fg_color=active)
-            self.btn_tool_line.configure(fg_color=default_fg, hover_color=default_hover)
-        else:
-            self.btn_tool_pencil.configure(fg_color=default_fg, hover_color=default_hover)
-            self.btn_tool_line.configure(fg_color=active)
+        def set_btn(btn: ctk.CTkButton, is_active: bool) -> None:
+            if is_active:
+                btn.configure(fg_color=active)
+            else:
+                btn.configure(fg_color=default_fg, hover_color=default_hover)
+
+        set_btn(self.btn_tool_pencil, self.tool_mode == "pencil")
+        set_btn(self.btn_tool_line, self.tool_mode == "line")
+        set_btn(self.btn_tool_rect, self.tool_mode == "rect")
+        set_btn(self.btn_tool_rect_fill, self.tool_mode == "rect_fill")
+        set_btn(self.btn_tool_ellipse, self.tool_mode == "ellipse")
+        set_btn(self.btn_tool_ellipse_fill, self.tool_mode == "ellipse_fill")
+
+    def _on_shift_mode_changed(self, v: str) -> None:
+        self.shift_mode.set(v)
+        label = "Rotacionar (wrap)" if v == "wrap" else "Deslocar (buffer)"
+        self.status_label.configure(text=f"Modo de deslocamento: {label}")
 
     # ============================
-    # Conversões e reta
+    # Transformações (shift) + buffers + undo
+    # ============================
+    def _get_target_sprite_indices_for_transform(self) -> List[int]:
+        mode = self._get_edit_mode()
+        if mode == "single":
+            return [self.selected_sprite_index]
+
+        if mode == "overlay":
+            block = self._get_2x2_indices()
+            if not block:
+                return [self.selected_sprite_index]
+            active = int(self.overlay_active.get())
+            active = max(0, min(3, active))
+            return [block[active]]
+
+        block = self._get_2x2_indices()
+        return block if block else [self.selected_sprite_index]
+
+    def _ensure_buffers(self, sp_idx: int) -> Dict[str, List[int]]:
+        buf = self._shift_buffers.get(sp_idx)
+        if buf is None:
+            buf = {"left": [], "right": [], "up": [], "down": []}
+            self._shift_buffers[sp_idx] = buf
+        return buf
+
+    def _push_undo_for_indices(self, indices: List[int]) -> None:
+        for sp_idx in indices:
+            sp = self.sprites[sp_idx]
+            buf = self._ensure_buffers(sp_idx)
+            self._undo_snapshot[sp_idx] = {
+                "rows": list(sp.rows),
+                "color_index": int(sp.color_index),
+                "buffers": {k: list(v) for k, v in buf.items()},
+            }
+
+    def _undo(self) -> None:
+        indices = self._get_target_sprite_indices_for_transform()
+        did = False
+        for sp_idx in indices:
+            snap = self._undo_snapshot.get(sp_idx)
+            if not snap:
+                continue
+            sp = self.sprites[sp_idx]
+            sp.rows = list(snap["rows"])
+            sp.color_index = int(snap["color_index"])
+            self._shift_buffers[sp_idx] = {k: list(v) for k, v in snap["buffers"].items()}
+            did = True
+
+        if did:
+            self._reset_shape_state()
+            self._touch_change()
+            self._redraw_all()
+            self.status_label.configure(text="Desfazer: sprite restaurado para o estado anterior.")
+        else:
+            self.status_label.configure(text="Nada para desfazer (apenas 1 nível).")
+
+    @staticmethod
+    def _mask_for_size(size: int) -> int:
+        return (1 << size) - 1
+
+    def _get_column_as_int(self, sp: Sprite, x: int) -> int:
+        out = 0
+        for y in range(sp.size):
+            if sp.get_pixel(x, y):
+                out |= 1 << (sp.size - 1 - y)
+        return out
+
+    def _set_column_from_int(self, sp: Sprite, x: int, col: int) -> None:
+        for y in range(sp.size):
+            bit = (col >> (sp.size - 1 - y)) & 1
+            sp.set_pixel(x, y, int(bit))
+
+    def _shift_wrap_sprite(self, sp: Sprite, direction: str) -> None:
+        mask = self._mask_for_size(sp.size)
+
+        if direction == "left":
+            for y in range(sp.size):
+                row = sp.rows[y] & mask
+                msb = (row >> (sp.size - 1)) & 1
+                sp.rows[y] = ((row << 1) & mask) | msb
+            return
+
+        if direction == "right":
+            for y in range(sp.size):
+                row = sp.rows[y] & mask
+                lsb = row & 1
+                sp.rows[y] = (row >> 1) | (lsb << (sp.size - 1))
+            return
+
+        if direction == "up":
+            first = sp.rows[0]
+            sp.rows = sp.rows[1:] + [first]
+            return
+
+        if direction == "down":
+            last = sp.rows[-1]
+            sp.rows = [last] + sp.rows[:-1]
+            return
+
+    def _shift_buffer_sprite(self, sp_idx: int, direction: str) -> None:
+        sp = self.sprites[sp_idx]
+        buf = self._ensure_buffers(sp_idx)
+        size = sp.size
+        mask = self._mask_for_size(size)
+
+        # IMPORTANTE:
+        # - em 8x8, guarda até 8 linhas/colunas
+        # - em 16x16, guarda até 16 linhas/colunas
+        max_keep = int(size)
+
+        def push_stack(key: str, value: int) -> None:
+            stack = buf[key]
+            stack.append(int(value))
+            if len(stack) > max_keep:
+                stack[:] = stack[-max_keep:]
+
+        def pop_stack(key: str) -> Optional[int]:
+            stack = buf[key]
+            if not stack:
+                return None
+            return int(stack.pop())
+
+        if direction == "left":
+            removed = self._get_column_as_int(sp, 0)
+            push_stack("left", removed)
+
+            for y in range(size):
+                row = sp.rows[y] & mask
+                sp.rows[y] = ((row << 1) & mask)  # entra 0 no LSB (coluna da direita)
+            restored = pop_stack("right")
+            if restored is not None:
+                self._set_column_from_int(sp, size - 1, restored)
+            return
+
+        if direction == "right":
+            removed = self._get_column_as_int(sp, size - 1)
+            push_stack("right", removed)
+
+            for y in range(size):
+                row = sp.rows[y] & mask
+                sp.rows[y] = (row >> 1)  # entra 0 no MSB (coluna da esquerda)
+            restored = pop_stack("left")
+            if restored is not None:
+                self._set_column_from_int(sp, 0, restored)
+            return
+
+        if direction == "up":
+            removed = sp.rows[0] & mask
+            push_stack("up", removed)
+
+            sp.rows = sp.rows[1:] + [0]
+            restored = pop_stack("down")
+            if restored is not None:
+                sp.rows[-1] = restored & mask
+            return
+
+        if direction == "down":
+            removed = sp.rows[-1] & mask
+            push_stack("down", removed)
+
+            sp.rows = [0] + sp.rows[:-1]
+            restored = pop_stack("up")
+            if restored is not None:
+                sp.rows[0] = restored & mask
+            return
+
+    def _shift(self, direction: str) -> None:
+        indices = self._get_target_sprite_indices_for_transform()
+        if not indices:
+            return
+
+        self._push_undo_for_indices(indices)
+
+        mode = self.shift_mode.get()
+        if mode == "wrap":
+            for sp_idx in indices:
+                self._shift_wrap_sprite(self.sprites[sp_idx], direction)
+        else:
+            for sp_idx in indices:
+                self._shift_buffer_sprite(sp_idx, direction)
+
+        self._reset_shape_state()
+        self._touch_change()
+        self._redraw_all()
+
+    # ============================
+    # Conversões e rasterização (formas)
     # ============================
     def _editor_dims(self) -> Tuple[int, int]:
         mode = self._get_edit_mode()
@@ -1167,6 +1453,77 @@ class SpriteEditorApp(ctk.CTk):
                 y += sy
         return pts
 
+    @staticmethod
+    def _rect_points(x0: int, y0: int, x1: int, y1: int, *, filled: bool) -> List[Tuple[int, int]]:
+        x_min, x_max = (x0, x1) if x0 <= x1 else (x1, x0)
+        y_min, y_max = (y0, y1) if y0 <= y1 else (y1, y0)
+        pts: List[Tuple[int, int]] = []
+
+        if filled:
+            for y in range(y_min, y_max + 1):
+                for x in range(x_min, x_max + 1):
+                    pts.append((x, y))
+            return pts
+
+        for x in range(x_min, x_max + 1):
+            pts.append((x, y_min))
+            pts.append((x, y_max))
+        for y in range(y_min + 1, y_max):
+            pts.append((x_min, y))
+            pts.append((x_max, y))
+        return pts
+
+    @staticmethod
+    def _ellipse_points(x0: int, y0: int, x1: int, y1: int, *, filled: bool) -> List[Tuple[int, int]]:
+        x_min, x_max = (x0, x1) if x0 <= x1 else (x1, x0)
+        y_min, y_max = (y0, y1) if y0 <= y1 else (y1, y0)
+
+        w = x_max - x_min + 1
+        h = y_max - y_min + 1
+
+        cx = x_min + (w - 1) / 2.0
+        cy = y_min + (h - 1) / 2.0
+        rx = (w - 1) / 2.0
+        ry = (h - 1) / 2.0
+        if rx <= 0:
+            rx = 0.5
+        if ry <= 0:
+            ry = 0.5
+
+        pts: List[Tuple[int, int]] = []
+        inside_map: Dict[Tuple[int, int], bool] = {}
+
+        for y in range(y_min, y_max + 1):
+            for x in range(x_min, x_max + 1):
+                px = x + 0.5
+                py = y + 0.5
+                nx = (px - (cx + 0.5)) / (rx + 0.000001)
+                ny = (py - (cy + 0.5)) / (ry + 0.000001)
+                inside = (nx * nx + ny * ny) <= 1.0 + 1e-9
+                inside_map[(x, y)] = inside
+                if filled and inside:
+                    pts.append((x, y))
+
+        if filled:
+            return pts
+
+        for y in range(y_min, y_max + 1):
+            for x in range(x_min, x_max + 1):
+                if not inside_map.get((x, y), False):
+                    continue
+                n_out = False
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    xx, yy = x + dx, y + dy
+                    if xx < x_min or xx > x_max or yy < y_min or yy > y_max:
+                        n_out = True
+                        break
+                    if not inside_map.get((xx, yy), False):
+                        n_out = True
+                        break
+                if n_out:
+                    pts.append((x, y))
+        return pts
+
     def _apply_point_in_mode(self, x: int, y: int, value: int) -> None:
         mode = self._get_edit_mode()
         if mode == "single":
@@ -1185,17 +1542,37 @@ class SpriteEditorApp(ctk.CTk):
             if 0 <= xx < w and 0 <= yy < h:
                 self._apply_point_in_mode(xx, yy, value)
 
-    def _commit_line(self, start: Tuple[int, int], end: Tuple[int, int], value: int) -> None:
-        pts = self._bresenham_line(start[0], start[1], end[0], end[1])
-        for x, y in pts:
-            self._apply_point_in_mode(x, y, value)
+    def _commit_tool_shape(self, start: Tuple[int, int], end: Tuple[int, int], value: int) -> None:
+        w, h = self._editor_dims()
 
-    def _clear_line_preview(self) -> None:
+        def in_bounds(p: Tuple[int, int]) -> bool:
+            return 0 <= p[0] < w and 0 <= p[1] < h
+
+        if not in_bounds(start) or not in_bounds(end):
+            return
+
+        if self.tool_mode == "line":
+            pts = self._bresenham_line(start[0], start[1], end[0], end[1])
+        elif self.tool_mode == "rect":
+            pts = self._rect_points(start[0], start[1], end[0], end[1], filled=False)
+        elif self.tool_mode == "rect_fill":
+            pts = self._rect_points(start[0], start[1], end[0], end[1], filled=True)
+        elif self.tool_mode == "ellipse":
+            pts = self._ellipse_points(start[0], start[1], end[0], end[1], filled=False)
+        elif self.tool_mode == "ellipse_fill":
+            pts = self._ellipse_points(start[0], start[1], end[0], end[1], filled=True)
+        else:
+            return
+
+        for x, y in pts:
+            if 0 <= x < w and 0 <= y < h:
+                self._apply_point_in_mode(x, y, value)
+
+    def _clear_tool_preview(self) -> None:
         self.editor_canvas.delete("tool_preview")
 
-    def _draw_line_preview(self, start: Tuple[int, int], end: Tuple[int, int]) -> None:
-        self._clear_line_preview()
-        pts = self._bresenham_line(start[0], start[1], end[0], end[1])
+    def _draw_points_preview(self, pts: List[Tuple[int, int]]) -> None:
+        self._clear_tool_preview()
         scale = EDITOR_SCALE
         for x, y in pts:
             x0 = x * scale
@@ -1207,6 +1584,28 @@ class SpriteEditorApp(ctk.CTk):
                 tags=("tool_preview",),
             )
 
+    def _draw_tool_preview(self, start: Tuple[int, int], end: Tuple[int, int]) -> None:
+        w, h = self._editor_dims()
+        if not (0 <= start[0] < w and 0 <= start[1] < h and 0 <= end[0] < w and 0 <= end[1] < h):
+            self._clear_tool_preview()
+            return
+
+        if self.tool_mode == "line":
+            pts = self._bresenham_line(start[0], start[1], end[0], end[1])
+        elif self.tool_mode == "rect":
+            pts = self._rect_points(start[0], start[1], end[0], end[1], filled=False)
+        elif self.tool_mode == "rect_fill":
+            pts = self._rect_points(start[0], start[1], end[0], end[1], filled=True)
+        elif self.tool_mode == "ellipse":
+            pts = self._ellipse_points(start[0], start[1], end[0], end[1], filled=False)
+        elif self.tool_mode == "ellipse_fill":
+            pts = self._ellipse_points(start[0], start[1], end[0], end[1], filled=True)
+        else:
+            self._clear_tool_preview()
+            return
+
+        self._draw_points_preview(pts)
+
     # ============================
     # Pintura / eventos do editor
     # ============================
@@ -1215,34 +1614,31 @@ class SpriteEditorApp(ctk.CTk):
         if pos is None:
             return
 
-        # linha: usa clique-início / clique-fim (sem arrasto)
-        if self.tool_mode == "line":
-            if self._get_edit_mode() == "2x2" and not self._get_2x2_indices():
-                self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
+        if self._get_edit_mode() == "2x2" and not self._get_2x2_indices():
+            self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
+            return
+
+        if self.tool_mode in ("line", "rect", "rect_fill", "ellipse", "ellipse_fill"):
+            if self._shape_start is None:
+                self._shape_start = pos
+                self._shape_current = pos
+                self._shape_value = value
+                self._draw_tool_preview(self._shape_start, self._shape_current)
                 return
 
-            if self._line_start is None:
-                self._line_start = pos
-                self._line_current = pos
-                self._line_value = value
-                self._draw_line_preview(self._line_start, self._line_current)
-                return
+            self._push_undo_for_indices(self._get_target_sprite_indices_for_transform())
 
             end = pos
-            self._commit_line(self._line_start, end, self._line_value)
-            self._line_start = None
-            self._line_current = None
-            self._clear_line_preview()
+            self._commit_tool_shape(self._shape_start, end, self._shape_value)
+            self._shape_start = None
+            self._shape_current = None
+            self._clear_tool_preview()
             self._touch_change()
             self._redraw_all()
             return
 
-        # pincel
         if self.tool_mode == "pencil":
-            mode = self._get_edit_mode()
-            if mode == "2x2" and not self._get_2x2_indices():
-                self.status_label.configure(text="2x2 indisponível na borda da grade. Selecione outro sprite.")
-                return
+            self._push_undo_for_indices(self._get_target_sprite_indices_for_transform())
 
             self._is_painting = True
             self._paint_value = value
@@ -1266,7 +1662,6 @@ class SpriteEditorApp(ctk.CTk):
         if pos == self._last_paint_xy:
             return
 
-        # “liga” os pontos entre o último e o atual para não ficar falhado no arrasto
         if self._last_paint_xy is not None:
             x0, y0 = self._last_paint_xy
             x1, y1 = pos
@@ -1286,18 +1681,18 @@ class SpriteEditorApp(ctk.CTk):
             self._last_paint_xy = None
 
     def _on_editor_motion(self, event: tk.Event) -> None:
-        if self.tool_mode != "line":
+        if self.tool_mode not in ("line", "rect", "rect_fill", "ellipse", "ellipse_fill"):
             return
-        if self._line_start is None:
+        if self._shape_start is None:
             return
         pos = self._event_to_editor_xy(event)
         if pos is None:
-            self._clear_line_preview()
+            self._clear_tool_preview()
             return
-        if pos == self._line_current:
+        if pos == self._shape_current:
             return
-        self._line_current = pos
-        self._draw_line_preview(self._line_start, self._line_current)
+        self._shape_current = pos
+        self._draw_tool_preview(self._shape_start, self._shape_current)
 
     # ============================
     # Projeto / tamanho
@@ -1326,12 +1721,13 @@ class SpriteEditorApp(ctk.CTk):
         self.last_loaded_project_name = None
         self._baseline_signature = None
 
+        self._shift_buffers = {}
+        self._undo_snapshot = {}
+
         self.tool_mode = "pencil"
-        self._line_start = None
-        self._line_current = None
+        self._reset_shape_state()
         self._is_painting = False
         self._last_paint_xy = None
-        self._clear_line_preview()
         self._update_tool_buttons()
 
         self.table_label.configure(
@@ -1483,7 +1879,7 @@ class SpriteEditorApp(ctk.CTk):
                     fill="#FFFFFF",
                     text="2x2 indisponível na borda.\nSelecione um sprite que permita bloco 2x2."
                 )
-                self._clear_line_preview()
+                self._clear_tool_preview()
                 self._update_overlay_hint()
                 return
 
@@ -1515,10 +1911,13 @@ class SpriteEditorApp(ctk.CTk):
             self.editor_canvas.configure(scrollregion=(0, 0, sp.size * scale, sp.size * scale))
             self._draw_grid(self.editor_canvas, sp.size, sp.size, scale, major_every=sp.size)
 
-        if self.tool_mode == "line" and self._line_start is not None and self._line_current is not None:
-            self._draw_line_preview(self._line_start, self._line_current)
+        if self.tool_mode in ("line", "rect", "rect_fill", "ellipse", "ellipse_fill"):
+            if self._shape_start is not None and self._shape_current is not None:
+                self._draw_tool_preview(self._shape_start, self._shape_current)
+            else:
+                self._clear_tool_preview()
         else:
-            self._clear_line_preview()
+            self._clear_tool_preview()
 
         self._update_overlay_hint()
 
@@ -1684,12 +2083,13 @@ class SpriteEditorApp(ctk.CTk):
         self.last_loaded_project_name = name
         self._mark_baseline()
 
+        self._shift_buffers = {}
+        self._undo_snapshot = {}
+
         self.tool_mode = "pencil"
-        self._line_start = None
-        self._line_current = None
+        self._reset_shape_state()
         self._is_painting = False
         self._last_paint_xy = None
-        self._clear_line_preview()
         self._update_tool_buttons()
 
         count = 256 if sprite_size == 8 else 64
@@ -1773,12 +2173,12 @@ class SpriteEditorApp(ctk.CTk):
 
             def do_load() -> None:
                 try:
-                    name, sprite_size, _created_at, sprites = self.db.load_project(int(p["id"]))
+                    name2, sprite_size2, _created_at, sprites2 = self.db.load_project(int(p["id"]))
                     self._apply_loaded_project(
                         project_id=int(p["id"]),
-                        name=name,
-                        sprite_size=sprite_size,
-                        sprites=sprites
+                        name=name2,
+                        sprite_size=sprite_size2,
+                        sprites=sprites2
                     )
                     dlg.destroy()
                 except Exception as e:
