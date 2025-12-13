@@ -15,7 +15,7 @@ Editor de sprites **MSX1** (estilo **TMS9918A**) feito em **Python** com interfa
 
 ## Interface do usuário (exemplo)
 
-![Interface principal](PED2_main.png)
+![Interface principal](PED3_main.png)
 
 ---
 
@@ -145,9 +145,15 @@ Empilha visualmente 4 sprites (bloco 2x2) na mesma área **(mesmo tamanho do spr
 ## Como executar
 
 Crie/ative um ambiente virtual e instale dependências:
-bash pip install -r requirements.txt
+
+```bash
+   pip install -r requirements.txt
+```
+
 Depois:
-bash python main.py
+```bash 
+   python main.py
+```
 ----
 ## Notas rápidas de uso
 
